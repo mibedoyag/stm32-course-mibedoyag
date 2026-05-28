@@ -22,21 +22,23 @@
 //  #warning "FPU is not initialized, but the project is compiling for an FPU. Please initialize the FPU before use."
 //#endif
 
-/* definicion de variables del sistema */
-
-uint8_t dummy_8bit = 0;
-uint16_t dummy_16bit = 0;
-uint32_t dummy_32bit = 0;
-
-uint16_t dummy_16bit_dec = 0;
-uint16_t dummy_16bit_hex = 0;
-uint16_t dummy_16bit_bin = 0;
-
-uint8_t overflow_demo = 0;
 
 
 int main(void)
 {
+
+	/* definicion de variables del sistema */
+
+	uint8_t dummy_8bit = 0;
+	uint16_t dummy_16bit = 0;
+	uint32_t dummy_32bit = 0;
+
+	uint16_t dummy_16bit_dec = 0;
+	uint16_t dummy_16bit_hex = 0;
+	uint16_t dummy_16bit_bin = 0;
+
+	uint8_t overflow_demo = 0;
+
 	dummy_8bit = 123;
 	dummy_16bit = 4986;
 	dummy_32bit = 12345678;
@@ -56,10 +58,10 @@ int main(void)
 
 	/*incremento el vaor de la variable dummy_8bit en 1 y lo cargo en la variable overflow demo*/
 
-		overflow_demo = dummy_8bit + 1; //prediccion
-		overflow_demo = overflow_demo + 1;
+	overflow_demo = dummy_8bit + 1; //prediccion
+	overflow_demo = overflow_demo + 1;
 
-		overflow_demo = 735;
+	overflow_demo = 735;
 
 	/* Loop forever */
 	while(1) {
