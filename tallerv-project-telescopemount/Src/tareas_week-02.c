@@ -27,6 +27,7 @@
 
 int main(void)
 {
+
 	/* definicion de variables del sistema */
 
 	uint8_t dummy_8bit = 0;
@@ -73,3 +74,5 @@ int main(void)
 	}
 	return 0;
 }
+
+
