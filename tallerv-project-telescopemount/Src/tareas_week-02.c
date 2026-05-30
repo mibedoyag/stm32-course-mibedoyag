@@ -1,0 +1,78 @@
+/**
+ ******************************************************************************
+ * @file           : main.c
+ * @author         : Miguel A. Bedoya Gonzalez --> mibedoyag@unal.edu.co
+ * @brief          : Main program body
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2026 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
+
+#include <stdint.h>
+#include <stm32f4xx.h>
+
+//#if !defined(__SOFT_FP__) && defined(__ARM_FP)
+//  #warning "FPU is not initialized, but the project is compiling for an FPU. Please initialize the FPU before use."
+//#endif
+
+
+
+int main(void)
+{
+
+	/* definicion de variables del sistema */
+
+	uint8_t dummy_8bit = 0;
+
+	uint16_t dummy_16bit = 0;
+	(void)dummy_16bit;
+
+	uint32_t dummy_32bit = 0;
+	(void)dummy_32bit;
+
+	uint16_t dummy_16bit_dec = 0;
+	uint16_t dummy_16bit_hex = 0;
+	uint16_t dummy_16bit_bin = 0;
+
+	uint8_t overflow_demo = 0;
+
+	dummy_8bit = 123;
+	dummy_16bit = 4986;
+	dummy_32bit = 12345678;
+
+	dummy_16bit_dec = 32;
+	dummy_16bit_hex = 0x20;
+	dummy_16bit_bin = 0b100000;
+
+
+	/* cargando el valor xxxx en la variable yyyy*/
+	dummy_16bit_bin = dummy_16bit_bin << 4;
+	dummy_16bit_bin = dummy_16bit_bin >> 5;
+
+	dummy_8bit = 255;
+	dummy_16bit = 255;
+	dummy_32bit = 255;
+
+	/*incremento el vaor de la variable dummy_8bit en 1 y lo cargo en la variable overflow demo*/
+
+	overflow_demo = dummy_8bit + 1; //prediccion
+	overflow_demo = overflow_demo + 1;
+
+	overflow_demo = 735;
+
+	/* Loop forever */
+	while(1) {
+
+	}
+	return 0;
+}
+
+
