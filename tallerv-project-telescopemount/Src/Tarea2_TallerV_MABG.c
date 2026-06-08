@@ -21,21 +21,49 @@
 
 /* Varbiables */
 
-uint16_t counter_EXTI = 0;
+uint16_t counter_exti = 0;
+uint16_t value = 0;
+volatile uint8_t increment_counter = 0;
+volatile uint8_t digits[4] = {0, 0, 0, 0};
+volatile uint8_t request_isrtim = 0;
+volatile uint8_t currentdigit = 0;
 
 /* Definición de funciones*/
 
-void init_hardware(void);
+void init_hardware_sevensegm(void);
 void blinky(void);
+void init_EXTI(void);
+void update_digits(void);
+void init_refresh(void);
+void set_segments(void);
+void mostrardigitos (void);
 
 /* Main */
 
 int main(void){
 	blinky();
+	init_hardware_sevensegm();
+	init_EXTI();
+	init_refresh();
 
 
 	while(1){
 
+		//Logica del los EXTI0 y EXTI2
+		if (increment_counter == 1){
+			counter_exti--; //Resta 1 unidad al contador
+			increment_counter = 0; //Vuelve la variable volatil a 0 para que no se sobreescriba
+		} else if (increment_counter == 2){
+			counter_exti++; //Suma 1 unidad al contador
+			increment_counter = 0; //Vuelve la variable volatil a 0 para que no se sobreescriba
+		}
+
+		//Logica del ISR TIM3
+		if (request_isrtim == 1){
+			request_isrtim = 0; //VUelve el valor a 0 para que no se sobreescriba y vuelva al ciclo
+			mostrardigitos (); //Ejecuta la función
+		}
+		update_digits(); //Ejecuta la función que revisa si hay nuevo digito y lo descompone
 
 	}
 
@@ -44,7 +72,7 @@ int main(void){
 
 /* Funciones */
 
-void init_hardware(void){
+void init_hardware_sevensegm(void){
 	//Activando las señales de reloj/
 	RCC->AHB1ENR &= ~RCC_AHB1ENR_GPIOAEN; //Limpiando el registro
 	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN; //Activando las señal de reloj para GPIOA
@@ -54,6 +82,8 @@ void init_hardware(void){
 	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN; //Activando las señal de reloj para GPIOC
 	RCC->AHB1ENR &= ~RCC_AHB1ENR_GPIODEN; //Limpiando el registro
 	RCC->AHB1ENR |= RCC_AHB1ENR_GPIODEN; //Activando las señal de reloj para GPIOD
+	RCC->AHB1ENR &= ~RCC_AHB1ENR_GPIOHEN; //Limpiando el registro
+	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOHEN; //Activando las señal de reloj para GPIOH
 
 	/* Configuración de puertos GPIO para los LED del 7 segmentos */
 
@@ -72,7 +102,7 @@ void init_hardware(void){
 	GPIOB->PUPDR &= ~GPIO_PUPDR_PUPD8; //No pull up, no pull down
 
 	//Encendido del LED/
-	GPIOB->ODR |= GPIO_ODR_OD8;
+	GPIOB->ODR &= ~GPIO_ODR_OD8;
 
 	/*Configuracion del pin C8 -> Segmento F */
 	//Configurción como salida
@@ -89,7 +119,7 @@ void init_hardware(void){
 	GPIOC->PUPDR &= ~GPIO_PUPDR_PUPD8; //No pull up, no pull down
 
 	//Encendido del LED/
-	GPIOC->ODR |= GPIO_ODR_OD8;
+	GPIOC->ODR &= ~GPIO_ODR_OD8;
 
 	/*Configuracion del pin C9 -> Segmento A */
 	//Configurción como salida
@@ -106,7 +136,7 @@ void init_hardware(void){
 	GPIOC->PUPDR &= ~GPIO_PUPDR_PUPD9; //No pull up, no pull down
 
 	//Encendido del LED/
-	GPIOC->ODR |= GPIO_ODR_OD9;
+	GPIOC->ODR &= ~GPIO_ODR_OD9;
 
 	/*Configuracion del pin C10 -> Segmento E */
 	//Configurción como salida
@@ -123,7 +153,7 @@ void init_hardware(void){
 	GPIOC->PUPDR &= ~GPIO_PUPDR_PUPD10; //No pull up, no pull down
 
 	//Encendido del LED/
-	GPIOC->ODR |= GPIO_ODR_OD10;
+	GPIOC->ODR &= ~GPIO_ODR_OD10;
 
 	/*Configuracion del pin C11 -> Segmento C */
 	//Configurción como salida
@@ -140,7 +170,7 @@ void init_hardware(void){
 	GPIOC->PUPDR &= ~GPIO_PUPDR_PUPD11; //No pull up, no pull down
 
 	//Encendido del LED/
-	GPIOC->ODR |= GPIO_ODR_OD11;
+	GPIOC->ODR &= ~GPIO_ODR_OD11;
 
 	/*Configuracion del pin C12 -> Segmento D */
 	//Configurción como salida
@@ -157,7 +187,7 @@ void init_hardware(void){
 	GPIOC->PUPDR &= ~GPIO_PUPDR_PUPD12; //No pull up, no pull down
 
 	//Encendido del LED/
-	GPIOC->ODR |= GPIO_ODR_OD12;
+	GPIOC->ODR &= ~GPIO_ODR_OD12;
 
 	/*Configuracion del pin D2 -> Segmento G */
 	//Configurción como salida
@@ -174,7 +204,7 @@ void init_hardware(void){
 	GPIOD->PUPDR &= ~GPIO_PUPDR_PUPD2; //No pull up, no pull down
 
 	//Encendido del LED/
-	GPIOD->ODR |= GPIO_ODR_OD2;
+	GPIOD->ODR &= ~GPIO_ODR_OD2;
 
 
 	/* Configuración de puertos GPIO para los Transistores */
@@ -213,22 +243,22 @@ void init_hardware(void){
 	//Activación/encendido del transistor
 	GPIOB->ODR |= GPIO_ODR_OD9;
 
-	/*Configuracion del pin H0 -> Digito D3 */
+	/*Configuracion del pin C3 -> Digito D3 */
 	//Configurción como salida
-	GPIOH->MODER &= ~GPIO_MODER_MODE0; //Limpiando el registro
-	GPIOH->MODER |= GPIO_MODER_MODE0_0;
+	GPIOC->MODER &= ~GPIO_MODER_MODE3; //Limpiando el registro
+	GPIOC->MODER |= GPIO_MODER_MODE3_0;
 
 	//Configuracion como salida push-pull/
-	GPIOH->OTYPER &= ~(GPIO_OTYPER_OT0);
+	GPIOC->OTYPER &= ~GPIO_OTYPER_OT3;
 
 	//Configuracion de la velocidad como alta/
-	GPIOH->OSPEEDR &= ~GPIO_OSPEEDR_OSPEED0; //Limpiando el registro
-	GPIOH->OSPEEDR |= GPIO_OSPEEDR_OSPEED0_1;
+	GPIOC->OSPEEDR &= ~GPIO_OSPEEDR_OSPEED3; //Limpiando el registro
+	GPIOC->OSPEEDR |= GPIO_OSPEEDR_OSPEED3_1;
 
-	GPIOH->PUPDR &= ~GPIO_PUPDR_PUPD0; //No pull up, no pull down
+	GPIOC->PUPDR &= ~GPIO_PUPDR_PUPD3; //No pull up, no pull down
 
 	//Activación/encendido del transistor
-	GPIOH->ODR |= GPIO_ODR_OD0;
+	GPIOC->ODR |= GPIO_ODR_OD3;
 
 	/*Configuracion del pin B7 -> Digito D4 */
 	//Configurción como salida
@@ -293,7 +323,7 @@ void blinky(void){
 	TIM2->PSC = 1600 - 1; // 0.1 ms O 10 kHz ya que el TIM2 es a 16 MHz / 1600 = 0.1 ms
 
 	//Configurando el ARR
-	TIM2->ARR = 5000 - 1; // 0.1 ms * 5000 = 500 ms para que genere un ciclo
+	TIM2->ARR = 2500 - 1; // 0.1 ms * 5000 = 250 ms para que genere un ciclo
 
 	//Reinicio del contador
 	TIM2->CNT = 0; //Inicializa en 0
@@ -328,6 +358,255 @@ void TIM2_IRQHandler(void){
 	}
 }
 
+/* Funcion de condiguración para el EXTI */
+void init_EXTI(void){
+	//Encendiendo la señal de reloj para el bus APB2 donde esta el EXTI
+	RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+	//Configurando el MUX del EXTI 0 -> Fotocompuerta F2 (PA0)(Flanco de bajada)
+	SYSCFG->EXTICR[0] &= ~SYSCFG_EXTICR1_EXTI0; //Limpiamos la dirección del registro y se confiura el EXTI0 para que reconozca el PA0 (0000)
+
+	//Configurando para detectar flanco de bajada
+	EXTI->FTSR |= EXTI_FTSR_TR0; //Detectando flancos de bajada en la posición 0
+	EXTI->RTSR &= ~EXTI_RTSR_TR0; //Confirmando que el de subida este desactivado
 
 
+	//Configurando el MUX del EXTI 2 -> Fotocompuerta F1 (PC2) (Flanco de subida)
+	SYSCFG->EXTICR[0] &= ~SYSCFG_EXTICR1_EXTI2; //Limpiamos la dirección del registro
+	SYSCFG->EXTICR[0] |= SYSCFG_EXTICR1_EXTI2_PC; //EXTI2 reconociendo el puerto C (pin2)
+
+	//Configurando para detectar flanco de subida
+	EXTI->RTSR |= EXTI_RTSR_TR2; //Detectando flancos de bajada en la posición 2
+	EXTI->FTSR &= ~EXTI_FTSR_TR2; //Confirmando que el de bajada este desactivado
+
+	//Matriculando ambas interrupciones en el NVIC
+	__NVIC_EnableIRQ(EXTI0_IRQn);
+	__NVIC_EnableIRQ(EXTI2_IRQn);
+
+	//Limpiando la bandera de ambos EXTI (Se limpia con 1)
+	EXTI->PR |= EXTI_PR_PR0; //Limpiando la bandera de EXTI0
+	EXTI->PR |= EXTI_PR_PR2; //Limpiando la bandera de EXTI2
+
+	//Activando, por último, ambas interrupciones (OR)
+	EXTI->IMR |= EXTI_IMR_MR0; //Activando para el EXTI0
+	EXTI->IMR |= EXTI_IMR_MR2; //Activando para el EXTI2
+}
+
+/* Funcion ISR para el EXTI0 */
+void EXTI0_IRQHandler(void){
+	if (EXTI->PR && EXTI_PR_PR0){
+		//Bajamos la bandera del EXTI0 para que el ciclo continue
+		EXTI->PR |= EXTI_PR_PR0;
+		__NOP();
+		increment_counter = 1; //Variable volatil (Descartada en el proceso de revisar la ISR)
+	}
+}
+
+/* Funcion ISR para el EXTI2 */
+void EXTI2_IRQHandler(void){
+	if (EXTI->PR && EXTI_PR_PR2){
+		//Bajamos la bandera del EXTI2 para que el ciclo continue
+		EXTI->PR |= EXTI_PR_PR2;
+		__NOP();
+		increment_counter = 2; //Variable volatil (Descartada en el proceso de revisar la ISR)
+	}
+}
+
+/* Función que separa el valor de contador en unidades, decenas, centenas, unidades de mil */
+void update_digits(void){
+	uint16_t value = counter_exti % 10000; //Operación modulo
+	digits[0] = value / 1000; //Digito 1 del 7 segmentos a partir del contador
+	digits[1] = (value % 1000) / 100; //Digito 2 del 7 segmentos a partir del contador
+	digits[2] = (value % 100) / 10; //Digito 3 del 7 segmentos a partir del contador
+	digits[3] = value % 10; //Digito 4 del 7 segmentos a partir del contador
+}
+
+
+/* Funcion encargada del TIM3 para la actulización del 7 segmentos */
+void init_refresh(void){
+	RCC->APB1ENR &= ~RCC_APB1ENR_TIM3EN; //Limpieza de la posición del registro
+	RCC->APB1ENR |= RCC_APB1ENR_TIM3EN; //Encendiendo la señal de reloj para TIM3
+
+	//Configurando el Prescaler
+	TIM3->PSC = 1600 - 1; // 0.1 ms O 10 kHz ya que el TIM2 es a 16 MHz / 1600 = 0.1 ms
+
+	//Configurando el ARR
+	TIM3->ARR = 80 - 1; // 0.1 ms * 80 = 8 ms para que genere un ciclo
+
+	//Reinicio del contador
+	TIM3->CNT = 0; //Inicializa en 0
+
+	//Limpieza de la bandera de la interrupción
+	TIM3->SR &= ~TIM_SR_UIF;
+
+	//Asignando el tipo de interrupcion como update-event
+	TIM3->DIER &= ~ TIM_DIER_UIE; //Limpiando la posición del registro
+	TIM3->DIER |= TIM_DIER_UIE;
+
+	//Matriculando la interrupción generada por TIM3 en el NVIC
+	__NVIC_EnableIRQ(TIM3_IRQn);
+
+	//Configuracion del contador
+	TIM3->CR1 &= ~TIM_CR1_DIR; //Indicando la dirección de conteo para el contador
+
+	//Estableciendo la precarga del ARR
+	TIM3->CR1 &= ~TIM_CR1_ARPE; //Limpiando la posición del registro antes de asignar
+	TIM3->CR1 |= TIM_CR1_ARPE; //Activando la precarga
+
+	//Activando el contador para que el reloj inicie la propagación
+	TIM3->CR1 |= TIM_CR1_CEN;
+}
+
+/* Funcion ISR para el TIM3 (Startup) */
+void TIM3_IRQHandler(void){
+	//Confirmar que se ha generado una interrupcion
+	if(TIM3->SR && TIM_SR_UIF){
+		TIM3->SR &= ~TIM_SR_UIF; //Baja la bandera para que la interrupción se pueda volver a generar
+		request_isrtim = 1; //Cambia el estado de la variable volatil para no sobrecargar la funcion
+	}
+}
+
+/*Función que activa cada digito del 7 segmentos */
+void mostrardigitos (void){
+	//Apago todos lo digitos
+	GPIOC->ODR |= GPIO_ODR_OD6; //Se apaga el digito D1
+	GPIOB->ODR |= GPIO_ODR_OD9; //Se apaga el digito D2
+	GPIOC->ODR |= GPIO_ODR_OD3; //Se apaga el digito D3
+	GPIOB->ODR |= GPIO_ODR_OD7; //Se apaga el digito D4
+
+	//Configura y muestras los segmentos a activar por digito
+	set_segments();
+	switch(currentdigit)
+	    {
+	        case 0:
+	            GPIOC->ODR &= ~GPIO_ODR_OD6; //Enciendo el digito D1
+	            break;
+
+	        case 1:
+	            GPIOB->ODR &= ~GPIO_ODR_OD9; //Enciiendo el digito D2
+	            break;
+
+	        case 2:
+	            GPIOC->ODR &= ~GPIO_ODR_OD3; //Enciiendo el digito D3
+	            break;
+
+	        case 3:
+	            GPIOB->ODR &= ~GPIO_ODR_OD7; //Enciiendo el digito D4
+	            break;
+	    }
+	    currentdigit++; //Una vez muestra el digito del caso 0 pasa el siguiente digito
+
+	    if(currentdigit > 3)
+	    {
+	        currentdigit = 0; //Si la variable currendigit se paso de 3 que es el digito maximo, re resetea
+	    }
+	}
+
+/* Funcion que asigna los segmentos a activar para cada digito */
+void set_segments(void){
+	uint8_t numero; ///Variable que tendra el valor de cada uno de los digitos para saber que segmentos activar
+	    numero = digits[currentdigit];
+
+	    switch(numero)
+	    {
+	        case 0: //Activa los segmentos para escribir un 0
+	        	GPIOC->ODR &= ~GPIO_ODR_OD9; //Enciendo el segmento A
+	        	GPIOB->ODR &= ~GPIO_ODR_OD8; //Enciendo el segmento B
+	        	GPIOC->ODR &= ~GPIO_ODR_OD11; //Enciendo el segmento C
+	        	GPIOC->ODR &= ~GPIO_ODR_OD12; //Enciendo el segmento D
+	        	GPIOC->ODR &= ~GPIO_ODR_OD10; //Enciendo el segmento E
+	        	GPIOC->ODR &= ~GPIO_ODR_OD8; //Enciendo el segmento F
+	        	GPIOD->ODR |= GPIO_ODR_OD2; //Apaga el segmento G
+	            break;
+
+			case 1: //Activa los segmentos para escribir un 1
+				GPIOC->ODR |= GPIO_ODR_OD9; //Apaga el segmento A
+				GPIOB->ODR &= ~GPIO_ODR_OD8; //Enciendo el segmento B
+				GPIOC->ODR &= ~GPIO_ODR_OD11; //Enciendo el segmento C
+				GPIOC->ODR |= GPIO_ODR_OD12; //Apaga el segmento D
+				GPIOC->ODR |= GPIO_ODR_OD10; //Apaga el segmento E
+				GPIOC->ODR |= GPIO_ODR_OD8; //Apaga el segmento F
+				GPIOD->ODR |= GPIO_ODR_OD2; //Apaga el segmento G
+	            break;
+
+			case 2: //Activa los segmentos para escribir un 2
+				GPIOC->ODR &= ~GPIO_ODR_OD9; //Enciendo el segmento A
+				GPIOB->ODR &= ~GPIO_ODR_OD8; //Enciendo el segmento B
+				GPIOC->ODR |= GPIO_ODR_OD11; //Apaga el segmento C
+				GPIOC->ODR &= ~GPIO_ODR_OD12; //Enciendo el segmento D
+				GPIOC->ODR &= ~GPIO_ODR_OD10; //Enciendo el segmento E
+				GPIOC->ODR |= GPIO_ODR_OD8; //Apaga el segmento F
+				GPIOD->ODR &= ~GPIO_ODR_OD2; //Enciendo el segmento G
+				break;
+
+			case 3: //Activa los segmentos para escribir un 3
+				GPIOC->ODR &= ~GPIO_ODR_OD9; //Enciendo el segmento A
+				GPIOB->ODR &= ~GPIO_ODR_OD8; //Enciendo el segmento B
+				GPIOC->ODR &= ~GPIO_ODR_OD11; //Enciendo el segmento C
+				GPIOC->ODR &= ~GPIO_ODR_OD12; //Enciendo el segmento D
+				GPIOC->ODR |= GPIO_ODR_OD10; //Apaga  el segmento E
+				GPIOC->ODR |= GPIO_ODR_OD8; //Apaga el segmento F
+				GPIOD->ODR &= ~GPIO_ODR_OD2; //Enciendo el segmento G
+				break;
+
+			case 4: //Activa los segmentos para escribir un 4
+				GPIOC->ODR |= GPIO_ODR_OD9; //Apaga el segmento A
+				GPIOB->ODR &= ~GPIO_ODR_OD8; //Enciendo el segmento B
+				GPIOC->ODR &= ~GPIO_ODR_OD11; //Enciendo el segmento C
+				GPIOC->ODR |= GPIO_ODR_OD12; //Apaga el segmento D
+				GPIOC->ODR |= GPIO_ODR_OD10; //Apaga  el segmento E
+				GPIOC->ODR &= ~GPIO_ODR_OD8; //Enciendo  el segmento F
+				GPIOD->ODR &= ~GPIO_ODR_OD2; //Enciendo el segmento G
+				break;
+
+			case 5: //Activa los segmentos para escribir un 5
+				GPIOC->ODR &= ~GPIO_ODR_OD9; //Enciendo el segmento A
+				GPIOB->ODR |= GPIO_ODR_OD8; //Apaga el segmento B
+				GPIOC->ODR &= ~GPIO_ODR_OD11; //Enciendo el segmento C
+				GPIOC->ODR &= ~GPIO_ODR_OD12; //Enciendo el segmento D
+				GPIOC->ODR |= GPIO_ODR_OD10; //Apaga  el segmento E
+				GPIOC->ODR &= ~GPIO_ODR_OD8; //Enciendo  el segmento F
+				GPIOD->ODR &= ~GPIO_ODR_OD2; //Enciendo el segmento G
+				break;
+
+			case 6: //Activa los segmentos para escribir un 6
+				GPIOC->ODR &= ~GPIO_ODR_OD9; //Enciendo el segmento A
+				GPIOB->ODR |= GPIO_ODR_OD8; //Apaga el segmento B
+				GPIOC->ODR &= ~GPIO_ODR_OD11; //Enciendo el segmento C
+				GPIOC->ODR &= ~GPIO_ODR_OD12; //Enciendo el segmento D
+				GPIOC->ODR &= ~GPIO_ODR_OD10; //Enciendo el segmento E
+				GPIOC->ODR &= ~GPIO_ODR_OD8; //Enciendo  el segmento F
+				GPIOD->ODR &= ~GPIO_ODR_OD2; //Enciendo el segmento G
+				break;
+
+			case 7: //Activa los segmentos para escribir un 7
+				GPIOC->ODR &= ~GPIO_ODR_OD9; //Enciendo el segmento A
+				GPIOB->ODR &= ~GPIO_ODR_OD8; //Enciendo el segmento B
+				GPIOC->ODR &= ~GPIO_ODR_OD11; //Enciendo el segmento C
+				GPIOC->ODR |= GPIO_ODR_OD12; //Apaga el segmento D
+				GPIOC->ODR |= GPIO_ODR_OD10; //Apaga el segmento E
+				GPIOC->ODR |= GPIO_ODR_OD8; //Apaga el segmento F
+				GPIOD->ODR |= GPIO_ODR_OD2; //Apaga el segmento G
+				break;
+
+			case 8: //Activa los segmentos para escribir un 8
+				GPIOC->ODR &= ~GPIO_ODR_OD9; //Enciendo el segmento A
+				GPIOB->ODR &= ~GPIO_ODR_OD8; //Enciendo el segmento B
+				GPIOC->ODR &= ~GPIO_ODR_OD11; //Enciendo el segmento C
+				GPIOC->ODR &= ~GPIO_ODR_OD12; //Enciendo el segmento D
+				GPIOC->ODR &= ~GPIO_ODR_OD10; //Enciendo el segmento E
+				GPIOC->ODR &= ~GPIO_ODR_OD8; //Enciendo  el segmento F
+				GPIOD->ODR &= ~GPIO_ODR_OD2; //Enciendo el segmento G
+				break;
+
+			case 9: //Activa los segmentos para escribir un 9
+				GPIOC->ODR &= ~GPIO_ODR_OD9; //Enciendo el segmento A
+				GPIOB->ODR &= ~GPIO_ODR_OD8; //Apaga el segmento B
+				GPIOC->ODR &= ~GPIO_ODR_OD11; //Enciendo el segmento C
+				GPIOC->ODR &= ~GPIO_ODR_OD12; //Enciendo el segmento D
+				GPIOC->ODR |= GPIO_ODR_OD10; //Apaga el segmento E
+				GPIOC->ODR &= ~GPIO_ODR_OD8; //Enciendo  el segmento F
+				GPIOD->ODR &= ~GPIO_ODR_OD2; //Enciendo el segmento G
+				break;
+	    }
+}
 
