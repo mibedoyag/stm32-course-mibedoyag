@@ -430,7 +430,7 @@ void init_refresh(void){
 	TIM3->PSC = 1600 - 1; // 0.1 ms O 10 kHz ya que el TIM2 es a 16 MHz / 1600 = 0.1 ms
 
 	//Configurando el ARR
-	TIM3->ARR = 80 - 1; // 0.1 ms * 80 = 8 ms para que genere un ciclo
+	TIM3->ARR = 60 - 1; // 0.1 ms * 60 = 60 ms para que genere un ciclo
 
 	//Reinicio del contador
 	TIM3->CNT = 0; //Inicializa en 0
