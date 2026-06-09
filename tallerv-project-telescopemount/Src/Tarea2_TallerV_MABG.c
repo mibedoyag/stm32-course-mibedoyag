@@ -21,22 +21,21 @@
 
 /* Varbiables */
 
-uint16_t counter_exti = 0;
-uint16_t value = 0;
-volatile uint8_t increment_counter = 0;
-volatile uint8_t digits[4] = {0, 0, 0, 0};
-volatile uint8_t request_isrtim = 0;
-volatile uint8_t currentdigit = 0;
+uint16_t counter_exti = 0; //Variable que aumenta o disminuye de acuerdo a EXTI que se active (EXTI0 o EXTI2)
+volatile uint8_t increment_counter = 0; //Variable volatil que cambia activando la tarea de acuerdo a que ISR del EXTI se activa
+volatile uint8_t digits[4] = {0, 0, 0, 0}; //Arreglo de 4 digitos volatil que se conforma por cada uno de los digitos del 7 segmentos
+volatile uint8_t request_isrtim = 0; //Variable volatil que cambia cada que se activa la interrupción del TIM3 (6ms) que refresca o actualiza cada digito
+volatile uint8_t currentdigit = 0; //Variable volatil que indica cual es el digito actual que se va a procesar (idicando que segmentos del digito encienden y cual transistor se activa)
 
 /* Definición de funciones*/
 
-void init_hardware_sevensegm(void);
-void blinky(void);
-void init_EXTI(void);
-void update_digits(void);
-void init_refresh(void);
-void set_segments(void);
-void mostrardigitos (void);
+void init_hardware_sevensegm(void); //Función que inicia el hardware del 7 segmentos (GPIO de segmentos, transistores y fotocompuertas)
+void blinky(void); //Funcion encargada netamente del Blinky de estado
+void init_EXTI(void); //Función encarga de iniciar y configurar EXTI0 y EXTI2
+void update_digits(void); //Función encargada de verificar el número en que está el contador y descomponerlo en sus unidades
+void init_refresh(void); //Función encargada de configurar TIM3 que es quien indica la interrupción que lleva el tiempo de activación de cada digito
+void set_segments(void); //Función encargada de indicar, de acuerdo al numero de cada digito, qué segmentos debe activar
+void mostrardigitos (void); //Función encargada de Encender un digito (activar transistor) por interrupción del TIM3
 
 /* Main */
 
@@ -52,18 +51,18 @@ int main(void){
 		//Logica del los EXTI0 y EXTI2
 		if (increment_counter == 1){
 			counter_exti--; //Resta 1 unidad al contador
-			increment_counter = 0; //Vuelve la variable volatil a 0 para que no se sobreescriba
+			increment_counter = 0; //Vuelve la variable volatil a 0 para que no se sobreescriba, indicando que ya fue atendida la ISR del TIM0
 		} else if (increment_counter == 2){
 			counter_exti++; //Suma 1 unidad al contador
-			increment_counter = 0; //Vuelve la variable volatil a 0 para que no se sobreescriba
+			increment_counter = 0; //Vuelve la variable volatil a 0 para que no se sobreescriba, indicando que ya fue atendida la ISR del TIM2
 		}
 
 		//Logica del ISR TIM3
 		if (request_isrtim == 1){
-			request_isrtim = 0; //VUelve el valor a 0 para que no se sobreescriba y vuelva al ciclo
-			mostrardigitos (); //Ejecuta la función
+			request_isrtim = 0; //VUelve el valor a 0 para que no se sobreescriba y vuelva al ciclo, indicando que ya se atendio la ISR del TIM3
+			mostrardigitos (); //Ejecuta la función que muestra cada digito cada 8 ms
 		}
-		update_digits(); //Ejecuta la función que revisa si hay nuevo digito y lo descompone
+		update_digits(); //Ejecuta la función que revisa si hay nuevo digito y lo descompone en sus unidades actualizando el valor del display digito a digito
 
 	}
 
@@ -493,11 +492,11 @@ void mostrardigitos (void){
 	            GPIOB->ODR &= ~GPIO_ODR_OD7; //Enciiendo el digito D4
 	            break;
 	    }
-	    currentdigit++; //Una vez muestra el digito del caso 0 pasa el siguiente digito
+	    currentdigit++; //Una vez muestra el digito del caso 0 (D1) pasa el siguiente digito
 
 	    if(currentdigit > 3)
 	    {
-	        currentdigit = 0; //Si la variable currendigit se paso de 3 que es el digito maximo, re resetea
+	        currentdigit = 0; //Si la variable currendigit se paso de 3 que es el digito maximo, re reinicia al D1 o case 0
 	    }
 	}
 
