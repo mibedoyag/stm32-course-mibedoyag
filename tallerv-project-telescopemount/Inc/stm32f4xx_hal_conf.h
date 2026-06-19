@@ -43,6 +43,7 @@
  #define HAL_PWR_MODULE_ENABLED
  #define HAL_DMA_MODULE_ENABLED
  #define HAL_USART_MODULE_ENABLED
+ #define HAL_ADC_MODULE_ENABLED
 
 /* ########################## HSE/HSI Values adaptation ##################### */
 /**
