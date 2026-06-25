@@ -13,6 +13,30 @@
  * in the root directory of this software component.
  * If no LICENSE file comes with this software, it is provided AS-IS.
  *
+ *
+ * Mapeo de Pines:
+ * - 7 SEGMENTOS:
+ *
+ * A -> PC9
+ * B -> PB8
+ * C -> PC11
+ * D -> PC12
+ * E -> PC10
+ * F -> PC8
+ * G -> PD2
+ *
+ * - TRANSISTORES (DIGITOS):
+ * D1 (Digito 1) -> PC6
+ * D2 (Digito 2) -> PB9
+ * D3 (Digito 3) -> PC3
+ * D4 (Digito 4) -> PB7
+ *
+ * - FOTOCOMPUERTAS:
+ * F1 (Fotocompuerta 1 - Flanco Subida) -> PC2
+ * F2 (Fotocompuerta 2 - Flanco Bajada) -> PA0
+ *
+ * - BLINKY -> PH1
+ *
  ******************************************************************************
  */
 
@@ -374,7 +398,7 @@ void init_EXTI(void){
 	SYSCFG->EXTICR[0] |= SYSCFG_EXTICR1_EXTI2_PC; //EXTI2 reconociendo el puerto C (pin2)
 
 	//Configurando para detectar flanco de subida
-	EXTI->RTSR |= EXTI_RTSR_TR2; //Detectando flancos de bajada en la posición 2
+	EXTI->RTSR |= EXTI_RTSR_TR2; //Detectando flancos de subida en la posición 2
 	EXTI->FTSR &= ~EXTI_FTSR_TR2; //Confirmando que el de bajada este desactivado
 
 	//Matriculando ambas interrupciones en el NVIC
