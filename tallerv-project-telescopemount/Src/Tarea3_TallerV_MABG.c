@@ -63,11 +63,14 @@ ADC_HandleTypeDef hadc1 = {0};
 USART_HandleTypeDef husart2 = {0};
 
 volatile uint8_t showMsg = 0; //Variable que se modifica y lleva a la ejecución del Callback del Tim3 Led Estado (PH1)
-uint8_t msg_buffer[64] = {0}; //Arerglo donde estará el mensaje dinámico a transmitir USART2 Tx - max 64 caracteres
+uint8_t msg_buffer_enc[64] = {0}; //Arerglo donde estará el mensaje dinámico a transmitir USART2 Tx - max 64 caracteres
+
 
 volatile uint16_t raw_adc = 0; //Variable volatil donde se almacena el valor de la conversión ADC
 volatile uint16_t adc_done = 0; //Variable volatil que se modifica y lleva a la ejecución del Callback del ADC
 float adc_value_mv = 0.0f; //Variable donde se guarda el valor en mV de la conversión ADC
+uint8_t msg_buffer_adc[64] = {0}; //Arerglo donde estará el mensaje dinámico a transmitir USART2 Tx - max 64 caracteres
+
 
 volatile int16_t encoder_steps = 0; //Variable dedicada a almacenar los pasos actuales del encoder
 volatile uint16_t encoder_old = 0; //
@@ -87,8 +90,8 @@ static void SystemClock_Config(void);
 static void gpio_Init(void); //Función que inicializa y configura el puerto PH1 del blinky
 static void tim1_pwm_Init(void); //Función asociada a la inicialización y configuración del TIM1 (PWM -> CH1, CH2, CH3)
 static void tim2_encoder_Init(void); //Función asociada a la inicialización y configuración del TIM2 (Encoder -> CH1 (PA0), CH2 (PA1))
-static void tim3_Init(void); //Función asociada a la inicialización y configuración del TIM3 (Blinky)
-//static void tim4_adc_Init(void); //Función asociada a la inicialización y configuración del TIM4 (Disparo del ADC con TRGO (PA6))
+static void tim4_Init(void); //Función asociada a la inicialización y configuración del TIM4(Blinky)
+static void tim3_adc_Init(void); //Función asociada a la inicialización y configuración del TIM3 (Disparo del ADC con TRGO (PA6))
 static void usart2_Init(void); //Función asociada a la inicialización y configuración del USART2 (Rx, Tx)
 static void adc_Init(void); //Función asociada a la inicialización y configuración del ADC (PA6 ADC1_CH6)
 
@@ -97,15 +100,14 @@ int main(void)
     HAL_Init();           /* initialize HAL: SysTick, cache, priority grouping */
     SystemClock_Config(); /* configure clock tree: HSI at 16 MHz               */
     gpio_Init();          /* configure PA5 as push-pull output                  */
-    tim3_Init();          /* configure TIM3: update event every 250 ms          */
+    tim4_Init();          /* configure TIM3: update event every 250 ms          */
 
     usart2_Init();
     adc_Init();
     tim1_pwm_Init();
     tim2_encoder_Init();
-
-    //Lanzar la conversion en modo simple
     HAL_ADC_Start_IT(&hadc1);
+    tim3_adc_Init();
 
     HAL_USART_Transmit(&husart2, (uint8_t *)"Hola mundo!!\n\r", 14, 100);
 
@@ -129,20 +131,21 @@ int main(void)
         /* application loop — LED toggling happens in the callback */
     	if (showMsg == 1){
     		HAL_USART_Transmit(&husart2, (uint8_t *)"Hola mundo!!\n\r", 14, 100);
-    		sprintf((char *)msg_buffer, "Encoder = %u DIR = %u \n\r", encoder_steps, encoder_dir); //Creando el string dinamico con la información en mV
-    		HAL_USART_Transmit(&husart2, msg_buffer, strlen((char *)msg_buffer) - 1, 100); // Imprimimos el dato por el puerto serial
+    		sprintf((char *)msg_buffer_enc, "Encoder = %u DIR = %u \n\r", encoder_steps, encoder_dir); //Creando el string dinamico con la información en mV
+    		HAL_USART_Transmit(&husart2, msg_buffer_enc, strlen((char *)msg_buffer_enc) - 1, 100); // Imprimimos el dato por el puerto serial
 
-    		//Lanzar la conversion en modo simple
-    		HAL_ADC_Start_IT(&hadc1);
     		showMsg = 0;
     	}
 
     	//HAcer algo con el valor de la conversion ADC
     	if (adc_done == 1){
     		adc_value_mv = (float)((3300.0f / 4095.0f) * raw_adc); //Transformando el valor raw adc en un valor de mV
+    		pwm_blue = (raw_adc * 499) / 4095; //Realizando la conversión del raw_adc en duty para el pwm_blue
 
-    		//sprintf((char *)msg_buffer, "adc value = %f \n\r", adc_value_mv); //Creando el string dinamico con la información en mV
-    		//HAL_USART_Transmit(&husart2, msg_buffer, strlen((char *)msg_buffer) - 1, 100); // Imprimimos el dato por el puerto serial
+    		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, pwm_blue); //Asignando el valor del duty del pwm_blue al PWM del Canal 2.
+
+    		sprintf((char *)msg_buffer_adc, "adc value = %f \n\r", adc_value_mv); //Creando el string dinamico con la información en mV
+    		HAL_USART_Transmit(&husart2, msg_buffer_adc, strlen((char *)msg_buffer_adc) - 1, 100); // Imprimimos el dato por el puerto serial
 
     		adc_done = 0;
     	}
@@ -377,7 +380,8 @@ static void adc_Init(void){
 		 hadc1.Init.ContinuousConvMode = DISABLE;
 		 hadc1.Init.NbrOfConversion = 1;
 		 hadc1.Init.DiscontinuousConvMode = DISABLE;
-		 hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+		 hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T3_TRGO; //Utilizamos el TRGO del tim3 como trigger para la conversión
+		 hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING; //Se lanza un ADC cada que detecte flanco de subida del TRGO
 		 hadc1.Init.DMAContinuousRequests = DISABLE;
 
 		 //CArgar la configuracion en los registros FSR del MCU
@@ -397,11 +401,39 @@ static void adc_Init(void){
 		 //Registrar la interrupcion en el NVIC
 		 HAL_NVIC_EnableIRQ(ADC_IRQn);
 
+}
+
+/* Configuración del TIM3 para el TRGO del ADC1 */
+static void tim3_adc_Init(void){
+	__HAL_RCC_TIM3_CLK_ENABLE();
+
+	htim3.Instance = TIM3;
+
+	htim3.Init.Prescaler = 15999; //16 MHz / 16 kHz = 1 kHz (1 ms)
+	htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+	htim3.Init.Period = 29; //Periodo de 1 ms * 30 = 30 ms
+	htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+	htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+
+	//Cargando la configuracion en los registros FSR del MCU
+	HAL_TIM_Base_Init(&htim3);
+
+	//Configurando el TRGO del TIM3
+	TIM_MasterConfigTypeDef confTRGO = {0};
+
+	confTRGO.MasterOutputTrigger = TIM_TRGO_UPDATE;
+	confTRGO.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+
+	//Cargando la configuracion en los registros FSR del MCU para la sincronización del TRGO generado por UPdate Event para hacer la conversion ADC
+	HAL_TIMEx_MasterConfigSynchronization(&htim3, &confTRGO);
+
+	//Iniciando el TIM4
+	HAL_TIM_Base_Start(&htim3);
 
 }
 /*
- * tim3_Init
- * Configures TIM3 to generate an update event every 250 ms
+ * tim4_Init
+ * Configures TIM4 to generate an update event every 250 ms
  *
  * Clock chain:
  *   HSI (16 MHz) → APB1 (16 MHz) → TIM3 clock (16 MHz)
@@ -409,26 +441,26 @@ static void adc_Init(void){
  * PSC = 15999  →  tick = 16,000,000 / (15999 + 1) = 1,000 Hz  (1 ms per tick)
  * ARR = 249    →  period = (249 + 1) x 1 ms = 250 ms
  */
-static void tim3_Init(void)
+static void tim4_Init(void)
 {
-    /* Enable TIM3 clock on APB1 bus */
-    __HAL_RCC_TIM3_CLK_ENABLE();
+    /* Enable TIM4 clock on APB1 bus */
+    __HAL_RCC_TIM4_CLK_ENABLE();
 
-    /* Configure TIM3 base */
-    htim3.Instance               = TIM3;
-    htim3.Init.Prescaler         = 15999;
-    htim3.Init.CounterMode       = TIM_COUNTERMODE_UP;
-    htim3.Init.Period            = 249;
-    htim3.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
-    htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+    /* Configure TIM4 base */
+    htim4.Instance               = TIM4;
+    htim4.Init.Prescaler         = 15999;
+    htim4.Init.CounterMode       = TIM_COUNTERMODE_UP;
+    htim4.Init.Period            = 249;
+    htim4.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
+    htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
 
-    HAL_TIM_Base_Init(&htim3); //Cargando la configuracion en los registros FSR del MCU
+    HAL_TIM_Base_Init(&htim4); //Cargando la configuracion en los registros FSR del MCU
 
-    /* Enable TIM3 interrupt line in the NVIC */
-    HAL_NVIC_EnableIRQ(TIM3_IRQn);
+    /* Enable TIM4 interrupt line in the NVIC */
+    HAL_NVIC_EnableIRQ(TIM4_IRQn);
 
     /* Start TIM3 in interrupt mode — enables the update event interrupt */
-    HAL_TIM_Base_Start_IT(&htim3);
+    HAL_TIM_Base_Start_IT(&htim4);
     __NOP();
 
 }
@@ -440,7 +472,7 @@ static void tim3_Init(void)
  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-    if (htim->Instance == TIM3)
+    if (htim->Instance == TIM4)
     {
         HAL_GPIO_TogglePin(GPIOH, GPIO_PIN_1);
         showMsg = 1;
