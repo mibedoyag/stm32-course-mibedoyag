@@ -60,7 +60,7 @@ TIM_HandleTypeDef htim4;
 ADC_HandleTypeDef hadc1 = {0};
 
 /* USART2 handle — must be global so stm32f4xx_it.c can access it */
-USART_HandleTypeDef husart2 = {0};
+UART_HandleTypeDef huart2 = {0};
 
 volatile uint8_t showMsg = 0; //Variable que se modifica y lleva a la ejecución del Callback del Tim3 Led Estado (PH1)
 uint8_t msg_buffer_enc[64] = {0}; //Arerglo donde estará el mensaje dinámico a transmitir USART2 Tx - max 64 caracteres
@@ -76,8 +76,9 @@ volatile int16_t encoder_steps = 0; //Variable dedicada a almacenar los pasos ac
 volatile uint16_t encoder_old = 0; //
 volatile uint8_t encoder_dir = 0; //Variable que indicará la dirección del encoder (0 = CW, 1 = CCW)
 
-volatile uint8_t usart_clicks = 0; //Variable dondé estará el nḿero actual de click de acuerdo al comando que reciba de la consola (Rx)
-uint8_t rx_data;
+uint8_t usart_clicks = 0; //Variable dondé estará el nḿero actual de click de acuerdo al comando que reciba de la consola (Rx)
+uint8_t rx_data = 0;
+volatile uint8_t usart_done = 0;
 
 volatile uint16_t pwm_red = 0; //Variable que tendra el duty del PWM CH1 (PA8)
 volatile uint16_t pwm_green = 0; //Variable que tendra el duty del PWM CH2 (PA9)
@@ -109,7 +110,7 @@ int main(void)
     HAL_ADC_Start_IT(&hadc1);
     tim3_adc_Init();
 
-    HAL_USART_Transmit(&husart2, (uint8_t *)"Hola mundo!!\n\r", 14, 100);
+    HAL_UART_Transmit(&huart2, (uint8_t *)"Hola mundo!!\n\r", 14, 100);
 
     while (1)
     {
@@ -130,9 +131,9 @@ int main(void)
 
         /* application loop — LED toggling happens in the callback */
     	if (showMsg == 1){
-    		HAL_USART_Transmit(&husart2, (uint8_t *)"Hola mundo!!\n\r", 14, 100);
+    		HAL_UART_Transmit(&huart2, (uint8_t *)"Hola mundo!!\n\r", 14, 100);
     		sprintf((char *)msg_buffer_enc, "Encoder = %u DIR = %u \n\r", encoder_steps, encoder_dir); //Creando el string dinamico con la información en mV
-    		HAL_USART_Transmit(&husart2, msg_buffer_enc, strlen((char *)msg_buffer_enc) - 1, 100); // Imprimimos el dato por el puerto serial
+    		HAL_UART_Transmit(&huart2, msg_buffer_enc, strlen((char *)msg_buffer_enc) - 1, 100); // Imprimimos el dato por el puerto serial
 
     		showMsg = 0;
     	}
@@ -140,16 +141,47 @@ int main(void)
     	//HAcer algo con el valor de la conversion ADC
     	if (adc_done == 1){
     		adc_value_mv = (float)((3300.0f / 4095.0f) * raw_adc); //Transformando el valor raw adc en un valor de mV
-    		pwm_blue = (raw_adc * 499) / 4095; //Realizando la conversión del raw_adc en duty para el pwm_blue
+    		pwm_green = (raw_adc * 499) / 4095; //Realizando la conversión del raw_adc en duty para el pwm_green
 
-    		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, pwm_blue); //Asignando el valor del duty del pwm_blue al PWM del Canal 2.
+    		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_green); //Asignando el valor del duty del pwm_green al PWM del Canal 1.
 
     		sprintf((char *)msg_buffer_adc, "adc value = %f \n\r", adc_value_mv); //Creando el string dinamico con la información en mV
-    		HAL_USART_Transmit(&husart2, msg_buffer_adc, strlen((char *)msg_buffer_adc) - 1, 100); // Imprimimos el dato por el puerto serial
+    		HAL_UART_Transmit(&huart2, msg_buffer_adc, strlen((char *)msg_buffer_adc) - 1, 100); // Imprimimos el dato por el puerto serial
 
     		adc_done = 0;
     	}
 
+    	if (usart_done == 1){
+    		if (rx_data == '+'){
+    			if (usart_clicks < 100){
+    				usart_clicks ++;
+    			}
+    		}
+
+    		if (rx_data == '-'){
+    			if(usart_clicks > 0){
+    				usart_clicks --;
+    			}
+    		}
+
+    		if (rx_data == '0'){
+    			usart_clicks = 0;
+    		}
+
+    		if (rx_data == '2'){
+    			usart_clicks += 25;
+
+    			if(usart_clicks >= 100){
+    				usart_clicks = 100;
+    			}
+    		}
+
+    		pwm_blue = usart_clicks * 5; //Conversión del numero de clicks en duty del PWM Canal 2.
+    		__HAL_TIM_SET_COMPARE (&htim1, TIM_CHANNEL_2, pwm_blue); //Asignando el valor de PWM del canal 2
+    		HAL_UART_Receive_IT(&huart2, &rx_data, 1);
+
+    		usart_done = 0;
+    	}
 
 
     }
@@ -317,17 +349,17 @@ static void usart2_Init(void){
 	/* Enable GPIOA clock on AHB1 bus */
 	 __HAL_RCC_GPIOA_CLK_ENABLE();
 
-	 GPIO_InitTypeDef GPIO_Init_Tx = {0};
+	 GPIO_InitTypeDef GPIO_Init_Tx_Rx = {0};
 
-	 GPIO_Init_Tx.Pin = GPIO_PIN_2;
-	 GPIO_Init_Tx.Mode = GPIO_MODE_AF_PP;
-	 GPIO_Init_Tx.Pull = GPIO_NOPULL;
-	 GPIO_Init_Tx.Speed = GPIO_SPEED_FREQ_HIGH;
-	 GPIO_Init_Tx.Alternate = GPIO_AF7_USART2;
+	 GPIO_Init_Tx_Rx.Pin = GPIO_PIN_2 | GPIO_PIN_3; //Pin PA2 (Tx) y PA3 (Rx)
+	 GPIO_Init_Tx_Rx.Mode = GPIO_MODE_AF_PP;
+	 GPIO_Init_Tx_Rx.Pull = GPIO_NOPULL;
+	 GPIO_Init_Tx_Rx.Speed = GPIO_SPEED_FREQ_HIGH;
+	 GPIO_Init_Tx_Rx.Alternate = GPIO_AF7_USART2;
 
 
 	 //Cargar la configuracion en los registros FSR del MCU
-	 HAL_GPIO_Init(GPIOA, &GPIO_Init_Tx);
+	 HAL_GPIO_Init(GPIOA, &GPIO_Init_Tx_Rx);
 
 	 __NOP();
 
@@ -335,16 +367,20 @@ static void usart2_Init(void){
 	/* Enable USART2 clock on APB1 bus */
 	 __HAL_RCC_USART2_CLK_ENABLE();
 
-	 husart2.Instance = USART2;
-	 husart2.Init.BaudRate = 19200;
-	 husart2.Init.Mode = USART_MODE_TX; //Solo transmision
-	 husart2.Init.Parity = USART_PARITY_NONE;
-	 husart2.Init.StopBits = USART_STOPBITS_1; //1 bit de parada
-	 husart2.Init.WordLength = USART_WORDLENGTH_8B; //8N1
+	 huart2.Instance = USART2;
+	 huart2.Init.BaudRate = 19200;
+	 huart2.Init.Mode = USART_MODE_TX_RX; //Modo transmisión (Tx) y recepcion (Rx)
+	 huart2.Init.Parity = USART_PARITY_NONE;
+	 huart2.Init.StopBits = USART_STOPBITS_1; //1 bit de parada
+	 huart2.Init.WordLength = USART_WORDLENGTH_8B; //8N1
 
 	 //Cargando la configuracion en los registros FSR del MCU
-	 HAL_USART_Init(&husart2);
-	 __NOP();
+	 HAL_UART_Init(&huart2);
+	 //Registrar la interrupcion en el NVIC
+	 HAL_NVIC_EnableIRQ(USART2_IRQn);
+
+	 //Iniciando la Recepcion
+	 HAL_UART_Receive_IT(&huart2, &rx_data, 1);
 
 }
 
@@ -487,6 +523,16 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 		adc_done = 1;
 	}
 }
+
+//Callback de la ISR generada por el USART2 Rx
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart){
+	if (huart->Instance == USART2){
+		//Cargando  el dato de recepcion Rx a la variable
+		//rx_data = husart->Instance->DR;
+		usart_done = 1;
+	}
+}
+
 
 
 
