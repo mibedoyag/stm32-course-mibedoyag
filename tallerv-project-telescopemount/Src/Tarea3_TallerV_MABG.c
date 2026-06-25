@@ -63,18 +63,19 @@ ADC_HandleTypeDef hadc1 = {0};
 UART_HandleTypeDef huart2 = {0};
 
 volatile uint8_t showMsg = 0; //Variable que se modifica y lleva a la ejecución del Callback del Tim3 Led Estado (PH1)
-uint8_t msg_buffer_enc[64] = {0}; //Arerglo donde estará el mensaje dinámico a transmitir USART2 Tx - max 64 caracteres
+uint8_t msg_buffer[256] = {0}; //Arerglo donde estará el mensaje dinámico a transmitir USART2 Tx - max 256 caracteres
 
 
 volatile uint16_t raw_adc = 0; //Variable volatil donde se almacena el valor de la conversión ADC
 volatile uint16_t adc_done = 0; //Variable volatil que se modifica y lleva a la ejecución del Callback del ADC
 float adc_value_mv = 0.0f; //Variable donde se guarda el valor en mV de la conversión ADC
-uint8_t msg_buffer_adc[64] = {0}; //Arerglo donde estará el mensaje dinámico a transmitir USART2 Tx - max 64 caracteres
+//uint8_t msg_buffer_adc[64] = {0}; //Arerglo donde estará el mensaje dinámico a transmitir USART2 Tx - max 64 caracteres
 
 
 volatile int16_t encoder_steps = 0; //Variable dedicada a almacenar los pasos actuales del encoder
 volatile uint16_t encoder_old = 0; //
 volatile uint8_t encoder_dir = 0; //Variable que indicará la dirección del encoder (0 = CW, 1 = CCW)
+char *dir_string = 0;
 
 uint8_t usart_clicks = 0; //Variable dondé estará el nḿero actual de click de acuerdo al comando que reciba de la consola (Rx)
 uint8_t rx_data = 0;
@@ -110,31 +111,30 @@ int main(void)
     HAL_ADC_Start_IT(&hadc1);
     tim3_adc_Init();
 
-    HAL_UART_Transmit(&huart2, (uint8_t *)"Hola mundo!!\n\r", 14, 100);
-
     while (1)
     {
 
     	encoder_steps = __HAL_TIM_GET_COUNTER(&htim2) / 4;
 		pwm_red = encoder_steps * 5;
-		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, pwm_red);
 
 		if (__HAL_TIM_IS_TIM_COUNTING_DOWN(&htim2)) {
 			encoder_dir = 1;
+			dir_string = "CCW";
 		} else {
 			encoder_dir = 0;
+			dir_string = "CW";
 		}
 
 		if (pwm_red > 499) {
 			pwm_red = 499;
 		}
 
+		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, pwm_red);
+
         /* application loop — LED toggling happens in the callback */
     	if (showMsg == 1){
-    		HAL_UART_Transmit(&huart2, (uint8_t *)"Hola mundo!!\n\r", 14, 100);
-    		sprintf((char *)msg_buffer_enc, "Encoder = %u DIR = %u \n\r", encoder_steps, encoder_dir); //Creando el string dinamico con la información en mV
-    		HAL_UART_Transmit(&huart2, msg_buffer_enc, strlen((char *)msg_buffer_enc) - 1, 100); // Imprimimos el dato por el puerto serial
-
+    		sprintf((char *)msg_buffer, "ADC value = %u raw\n\r" "ADC value = %.0f mV\n\r" "Encoder dir: %s, value = %d\n\r" "UART value = %u clicks\n\r\n\r\n\r", raw_adc, adc_value_mv, dir_string, encoder_steps, usart_clicks);
+    		HAL_UART_Transmit(&huart2, msg_buffer, strlen((char *)msg_buffer) - 1, 100);
     		showMsg = 0;
     	}
 
@@ -144,9 +144,6 @@ int main(void)
     		pwm_green = (raw_adc * 499) / 4095; //Realizando la conversión del raw_adc en duty para el pwm_green
 
     		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_green); //Asignando el valor del duty del pwm_green al PWM del Canal 1.
-
-    		sprintf((char *)msg_buffer_adc, "adc value = %f \n\r", adc_value_mv); //Creando el string dinamico con la información en mV
-    		HAL_UART_Transmit(&huart2, msg_buffer_adc, strlen((char *)msg_buffer_adc) - 1, 100); // Imprimimos el dato por el puerto serial
 
     		adc_done = 0;
     	}
