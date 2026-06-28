@@ -14,27 +14,39 @@
  * If no LICENSE file comes with this software, it is provided AS-IS.
  *
  *
- * Mapeo de Pines:
- * - PWM TIM1 - AF01:
+ *** Mapeo de Pines:
+ ** PWM TIM1 - AF01:
  *
- * CH1 (Green) -> PA8
- * CH2 (Blue)  -> PA9
- * CH3 (Red)   -> PA10
+ * - CH1 (Green) -> PA8
+ * - CH2 (Blue)  -> PA9
+ * - CH3 (Red)   -> PA10
  *
- * - ENCODER TIM2 - AF01:
- * CH1 (encoder: CLK) -> PA0
- * CH2 (Encoder_ DT)  -> PA1
+ ** ENCODER TIM2 - AF01:
+ * - CH1 (encoder: CLK) -> PA0
+ * - CH2 (Encoder_ DT)  -> PA1
  *
- * - ADC TIM3 (TRGO):
- * ADC -> PA6
+ ** ADC TIM3 (TRGO):
+ * - ADC -> PA6
  *
- * - BLINKY TIM4 -> PH1
+ ** BLINKY TIM4 -> PH1
  *
- * - USART2 - AF01:
- * Tx -> PA2
- * Rx -> PA3
+ ** USART2 - AF01:
+ * - Tx -> PA2
+ * - Rx -> PA3
  *
- * - MCO2 - AF00 -> PC9:
+ ** MCO2 - AF00 -> PC9
+ *
+ ** Parámetros de Configuración para Terminal Serial:
+ * - Baudrate : 19200
+ * - Bits de Datos : 8 --\
+ * - Paridad : No      -- |--> 8N1
+ * - Bit de Parada : 1 --/
+ *
+ ** Caracteres de Recepción o Envío desde la Terminal Serial:
+ * - '+' : Incrementa en 1% el Duty Cycle pwm_blue (CH2).
+ * - '-' : Disminuye en 1% el Duty Cycle pwm_blue (CH2).
+ * - '0' : Lleva al 0% el Duty Cycle pwm_blue (CH2).
+ * - '5' : Lleva al 50% del Duty Cycle pwm_blue (CH2).
  *
  ******************************************************************************
  */
@@ -71,7 +83,6 @@ float adc_value_mv = 0.0f; //Variable donde se guarda y convierte el valor en mV
 
 
 volatile int16_t encoder_steps = 0; //Variable dedicada a almacenar los pasos dados y actuales del encoder -> CW ++ y CCW --
-//volatile uint16_t encoder_old = 0;
 volatile uint8_t encoder_dir = 0; //Variable que indicará la dirección del encoder (0 = CW, 1 = CCW)
 char *dir_string = 0; //Variable tipo string (caracter) que indica CW si es 0 y CCW si es 1 para enviar en Tx USART2
 
@@ -83,7 +94,16 @@ volatile uint16_t pwm_red = 0; //Variable que tendra el duty del PWM CH1 (PA8)
 volatile uint16_t pwm_green = 0; //Variable que tendra el duty del PWM CH2 (PA9)
 volatile uint16_t pwm_blue = 0; //Variable que tendra el duty del PWM CH3 (PA10)
 
+//FSM ejecución while
+typedef enum
+{
+	STATE_READ_ENCODER = 0,
+	STATE_PROCESS_ADC,
+	STATE_PROCESS_USART,
+	STATE_SEND_MESSAGE
+} AppState_t;
 
+AppState_t currentState = STATE_READ_ENCODER; //Al iniciar, siempre estará iniciandose la lectura del encoder para actualizarse
 
 /* Private function prototypes */
 static void SystemClock_Config(void);
@@ -107,79 +127,168 @@ int main(void)
     adc_Init();
     tim1_pwm_Init();
     tim2_encoder_Init();
-    HAL_ADC_Start_IT(&hadc1);
     tim3_adc_Init();
     mco2_Init ();
 
     while (1)
     {
+    	switch(currentState){
 
-    	encoder_steps = __HAL_TIM_GET_COUNTER(&htim2) / 4; //Leyendo el valor del contador del TIM2 que maneja el encoder, se divide entre 4 ya que el modo TI12 cuenta todos los flancos (4 por paso de ambos canales 2 por canal (asc y desc)
-		pwm_red = encoder_steps * 5; //Ya que el encoder va de 0 a 100 y el periodo de la señal PWM es del 500 us, se hace la conversión para que el duty vaya de 0 a 500 aproximadamente
+    	case STATE_READ_ENCODER:
+    		encoder_steps = __HAL_TIM_GET_COUNTER(&htim2) / 4; //Leyendo el valor del contador del TIM2 que maneja el encoder, se divide entre 4 ya que el modo TI12 cuenta todos los flancos (4 por paso de ambos canales 2 por canal (asc y desc)
+    		pwm_red = encoder_steps * 5; //Ya que el encoder va de 0 a 100 y el periodo de la señal PWM es del 500 us, se hace la conversión para que el duty vaya de 0 a 500 aproximadamente
 
-		if (__HAL_TIM_IS_TIM_COUNTING_DOWN(&htim2)) { //Leyendo la dirección y asignando el valor en encoder dir y dir_string para enviar por Tx USART2
-			encoder_dir = 1;
-			dir_string = "CCW";
-		} else {
-			encoder_dir = 0;
-			dir_string = "CW";
-		}
+    		if (pwm_red > 499) {
+				pwm_red = 499;
+			}
+    		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, pwm_red); //Asignando el nuevo CCR que tiene pwm_red al Canal 3
 
-		if (pwm_red > 499) {
-			pwm_red = 499;
-		}
+    		if (__HAL_TIM_IS_TIM_COUNTING_DOWN(&htim2)) { //Leyendo la dirección y asignando el valor en encoder_dir y dir_string para enviar por Tx USART2
+				encoder_dir = 1;
+				dir_string = "CCW";
+			} else {
+				encoder_dir = 0;
+				dir_string = "CW";
+			}
 
-		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, pwm_red); //Asignando el nuevo CCR que tiene pwm_red al Canal 3
+    		currentState = STATE_PROCESS_ADC;
+
+    		break;
+
+    	case STATE_PROCESS_ADC:
+			if (adc_done == 1) {
+				adc_value_mv = (float) ((3300.0f / 4095.0f) * raw_adc); //Transformando el valor raw adc en un valor de mV
+				pwm_green = (raw_adc * 499) / 4095; //Realizando la conversión del raw_adc en duty para el pwm_green
+
+				__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_green); //Asignando el valor del duty (CCR) del pwm_green al PWM del Canal 1.
+
+				adc_done = 0; //Limpiando la bandera para que vuelva a entrar
+			}
+
+			currentState = STATE_PROCESS_USART;
+
+			break;
+
+    	case STATE_PROCESS_USART:
+			if (usart_done == 1) {
+				if (rx_data == '+') { //Identificando el carater "+" para que incremente usart_clicks en 1
+					if (usart_clicks < 100) {
+						usart_clicks++;
+					}
+				}
+
+				if (rx_data == '-') { //Identificando el carater "-" para que disminuya usart_clicks en 1
+					if (usart_clicks > 0) {
+						usart_clicks--;
+					}
+				}
+
+				if (rx_data == '0') { //Identificando el carater "0" para que lleve la variable usart_clicks a 0
+					usart_clicks = 0;
+				}
+
+				if (rx_data == '5') { //Identificando el carater "5" para que incremente usart_clicks en 50
+					usart_clicks += 50;
+
+					if (usart_clicks >= 100) {
+						usart_clicks = 100;
+					}
+				}
+
+				pwm_blue = usart_clicks * 5; //Ya que usart_clicks va de 0 a 100 y el periodo de la señal PWM es del 500 us, se hace la conversión para que el duty vaya de 0 a 500 aproximadamente
+				__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, pwm_blue); //Asignando el valor de PWM del canal 2 que está en pwm_blue (CCR)
+				HAL_UART_Receive_IT(&huart2, &rx_data, 1); //Se vuelve a activar la recepcion de datos ya que cuando recibe algo esta se desactiva y toca volverla a ejercutarla para que espere un nuevo comando
+
+				usart_done = 0; //Limpiando la bandera para que vuelva a entrar
+			}
+
+			currentState = STATE_SEND_MESSAGE;
+
+			break;
+
+    	case STATE_SEND_MESSAGE:
+			if (showMsg == 1) {
+				sprintf((char*) msg_buffer,
+						"ADC value = %u raw\n\r" "ADC value = %.0f mV\n\r" "Encoder dir: %s, value = %d\n\r" "UART value = %u clicks\n\r\n\r\n\r",
+						raw_adc, adc_value_mv, dir_string, encoder_steps,
+						usart_clicks);
+				HAL_UART_Transmit(&huart2, msg_buffer,
+						strlen((char*) msg_buffer) - 1, 100);
+				showMsg = 0;
+			}
+
+			currentState = STATE_READ_ENCODER; //Reinia la FSM para que se mantenda en bucle ejecutandose un caso tras el otro
+
+			break;
+    	}
+
+
+//    	encoder_steps = __HAL_TIM_GET_COUNTER(&htim2) / 4; //Leyendo el valor del contador del TIM2 que maneja el encoder, se divide entre 4 ya que el modo TI12 cuenta todos los flancos (4 por paso de ambos canales 2 por canal (asc y desc)
+//		pwm_red = encoder_steps * 5; //Ya que el encoder va de 0 a 100 y el periodo de la señal PWM es del 500 us, se hace la conversión para que el duty vaya de 0 a 500 aproximadamente
+//
+//		if (__HAL_TIM_IS_TIM_COUNTING_DOWN(&htim2)) { //Leyendo la dirección y asignando el valor en encoder dir y dir_string para enviar por Tx USART2
+//			encoder_dir = 1;
+//			dir_string = "CCW";
+//		} else {
+//			encoder_dir = 0;
+//			dir_string = "CW";
+//		}
+//
+//		if (pwm_red > 499) {
+//			pwm_red = 499;
+//		}
+//
+//		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, pwm_red); //Asignando el nuevo CCR que tiene pwm_red al Canal 3
 
         /* application loop — LED toggling happens in the callback and Tx USART2*/
-    	if (showMsg == 1){
-    		sprintf((char *)msg_buffer, "ADC value = %u raw\n\r" "ADC value = %.0f mV\n\r" "Encoder dir: %s, value = %d\n\r" "UART value = %u clicks\n\r\n\r\n\r", raw_adc, adc_value_mv, dir_string, encoder_steps, usart_clicks);
-    		HAL_UART_Transmit(&huart2, msg_buffer, strlen((char *)msg_buffer) - 1, 100);
-    		showMsg = 0;
-    	}
+//    	if (showMsg == 1){
+//    		sprintf((char *)msg_buffer, "ADC value = %u raw\n\r" "ADC value = %.0f mV\n\r" "Encoder dir: %s, value = %d\n\r" "UART value = %u clicks\n\r\n\r\n\r", raw_adc, adc_value_mv, dir_string, encoder_steps, usart_clicks);
+//    		HAL_UART_Transmit(&huart2, msg_buffer, strlen((char *)msg_buffer) - 1, 100);
+//    		showMsg = 0;
+//    	}
 
     	//Hacer algo con el valor de la conversion ADC
-    	if (adc_done == 1){
-    		adc_value_mv = (float)((3300.0f / 4095.0f) * raw_adc); //Transformando el valor raw adc en un valor de mV
-    		pwm_green = (raw_adc * 499) / 4095; //Realizando la conversión del raw_adc en duty para el pwm_green
-
-    		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_green); //Asignando el valor del duty (CCR) del pwm_green al PWM del Canal 1.
-
-    		adc_done = 0; //Limpiando la bandera para que vuelva a entrar
-    	}
+//    	if (adc_done == 1){
+//    		adc_value_mv = (float)((3300.0f / 4095.0f) * raw_adc); //Transformando el valor raw adc en un valor de mV
+//    		pwm_green = (raw_adc * 499) / 4095; //Realizando la conversión del raw_adc en duty para el pwm_green
+//
+//    		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_green); //Asignando el valor del duty (CCR) del pwm_green al PWM del Canal 1.
+//
+//    		adc_done = 0; //Limpiando la bandera para que vuelva a entrar
+//    	}
 
     	//Funcion del callback asociado a la interrupcion por Rx de USART2
-    	if (usart_done == 1){
-    		if (rx_data == '+'){ //Identificando el carater "+" para que incremente usart_clicks en 1
-    			if (usart_clicks < 100){
-    				usart_clicks ++;
-    			}
-    		}
-
-    		if (rx_data == '-'){ //Identificando el carater "-" para que disminuya usart_clicks en 1
-    			if(usart_clicks > 0){
-    				usart_clicks --;
-    			}
-    		}
-
-    		if (rx_data == '0'){ //Identificando el carater "0" para que lleve la variable usart_clicks a 0
-    			usart_clicks = 0;
-    		}
-
-    		if (rx_data == '2'){ //Identificando el carater "2" para que incremente usart_clicks en 25
-    			usart_clicks += 25;
-
-    			if(usart_clicks >= 100){
-    				usart_clicks = 100;
-    			}
-    		}
-
-    		pwm_blue = usart_clicks * 5; //Ya que usart_clicks va de 0 a 100 y el periodo de la señal PWM es del 500 us, se hace la conversión para que el duty vaya de 0 a 500 aproximadamente
-    		__HAL_TIM_SET_COMPARE (&htim1, TIM_CHANNEL_2, pwm_blue); //Asignando el valor de PWM del canal 2 que está en pwm_blue (CCR)
-    		HAL_UART_Receive_IT(&huart2, &rx_data, 1); //Se vuelve a activar la recepcion de datos ya que cuando recibe algo, esta se desactiva y toca volverla a ejercutarla para que espere un nuevo comando
-
-    		usart_done = 0; //Limpiando la bandera para que vuelva a entrar
-    	}
+//    	if (usart_done == 1){
+//    		if (rx_data == '+'){ //Identificando el carater "+" para que incremente usart_clicks en 1
+//    			if (usart_clicks < 100){
+//    				usart_clicks ++;
+//    			}
+//    		}
+//
+//    		if (rx_data == '-'){ //Identificando el carater "-" para que disminuya usart_clicks en 1
+//    			if(usart_clicks > 0){
+//    				usart_clicks --;
+//    			}
+//    		}
+//
+//    		if (rx_data == '0'){ //Identificando el carater "0" para que lleve la variable usart_clicks a 0
+//    			usart_clicks = 0;
+//    		}
+//
+//    		if (rx_data == '2'){ //Identificando el carater "2" para que incremente usart_clicks en 25
+//    			usart_clicks += 25;
+//
+//    			if(usart_clicks >= 100){
+//    				usart_clicks = 100;
+//    			}
+//    		}
+//
+//    		pwm_blue = usart_clicks * 5; //Ya que usart_clicks va de 0 a 100 y el periodo de la señal PWM es del 500 us, se hace la conversión para que el duty vaya de 0 a 500 aproximadamente
+//    		__HAL_TIM_SET_COMPARE (&htim1, TIM_CHANNEL_2, pwm_blue); //Asignando el valor de PWM del canal 2 que está en pwm_blue (CCR)
+//    		HAL_UART_Receive_IT(&huart2, &rx_data, 1); //Se vuelve a activar la recepcion de datos ya que cuando recibe algo, esta se desactiva y toca volverla a ejercutarla para que espere un nuevo comando
+//
+//    		usart_done = 0; //Limpiando la bandera para que vuelva a entrar
+//    	}
 
 
     }
@@ -444,6 +553,9 @@ static void adc_Init(void){
 
 		 //Registrar la interrupcion en el NVIC
 		 HAL_NVIC_EnableIRQ(ADC_IRQn);
+
+		 HAL_ADC_Start_IT(&hadc1); //Iiniciando el ADC1
+
 
 }
 
