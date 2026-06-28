@@ -199,20 +199,28 @@ static void SystemClock_Config(void)
     RCC_OscInitStruct.OscillatorType      = RCC_OSCILLATORTYPE_HSI;
     RCC_OscInitStruct.HSIState            = RCC_HSI_ON;
     RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-    RCC_OscInitStruct.PLL.PLLState        = RCC_PLL_NONE;
-    HAL_RCC_OscConfig(&RCC_OscInitStruct);
+    RCC_OscInitStruct.PLL.PLLState        = RCC_PLL_NONE; //Desactiva el PLL, si se quiere llevar el MCU a la máxima freq. debe activarse (RCC_PLL_ON;) y luego se debe configurar los divisores y el multiplicador para llegar a la freq. final
+
+    /* Si se quiere configurar el PLL, primero se debe elegir la fuente que tomará el PLL para la conversión, este caso
+     * sería HSI, a continuación se configura el primer divisor (PLLM) (Ejm para 100 MHz: PLLM = 16 -> 16MHz / 16 = 1MHz),
+     * luego de este iría el multiplicador (PLLN) (PLLN = 400 -> 1MHz * 400 = 400 MHz), se sigue entonces con el siguiente
+     * y último divisor para el PLLCLK (PLLP) (RCC_PLLP_DIV4 = 4 -> 400MHz / 4 = 100 MHz y este será el PLLCLK. Hay un
+     * divisor más (PLLQ) que no afecta el CPU como tal si no para el USB o el SDIO por ejemplo (PLLQ = 7 ->
+     * 400 MHz / 7 = 57 MHz)*/
+
+    HAL_RCC_OscConfig(&RCC_OscInitStruct); //Cargano la configuración en los registros FSR del MCU
 
     /* Select HSI as SYSCLK — all bus dividers set to 1 */
-    RCC_ClkInitStruct.ClockType      = RCC_CLOCKTYPE_SYSCLK |
-                                       RCC_CLOCKTYPE_HCLK   |
-                                       RCC_CLOCKTYPE_PCLK1  |
-                                       RCC_CLOCKTYPE_PCLK2;
-    RCC_ClkInitStruct.SYSCLKSource   = RCC_SYSCLKSOURCE_HSI;
-    RCC_ClkInitStruct.AHBCLKDivider  = RCC_SYSCLK_DIV1;   /* HCLK  = 16 MHz */
-    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;     /* APB1  = 16 MHz */
-    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;     /* APB2  = 16 MHz */
+    RCC_ClkInitStruct.ClockType      = RCC_CLOCKTYPE_SYSCLK | //Todos estos relojes tendrán esta configuracion, reloj principal SYSCLK
+                                       RCC_CLOCKTYPE_HCLK   | //reloj AHB HCLK
+                                       RCC_CLOCKTYPE_PCLK1  | //reloj APB1 PCLK1
+                                       RCC_CLOCKTYPE_PCLK2;   //reloj APB2 PCLK2
+    RCC_ClkInitStruct.SYSCLKSource   = RCC_SYSCLKSOURCE_HSI;  // EL reloj principal del sistema (SYSCLK) utilizará como fuente el HSI (Internal), PLLCLK si se usará PLL
+    RCC_ClkInitStruct.AHBCLKDivider  = RCC_SYSCLK_DIV1;   /* HCLK  = 16 MHz */ //Si se utiliza PLL se debe tener en cuenta está división de acuerdo a lo máximo que soporta el BUS
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;     /* APB1  = 16 MHz */ //Si se utiliza PLL se debe tener en cuenta está división de acuerdo a lo máximo que soporta el BUS
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;     /* APB2  = 16 MHz */ //Si se utiliza PLL se debe tener en cuenta está división de acuerdo a lo máximo que soporta el BUS
 
-    /* FLASH_LATENCY_0 = zero wait states, correct for 16 MHz */
+    /* FLASH_LATENCY_0 = zero wait states, correct for 16 MHz */ //Para  100 MHz, por ejemplo, se debe agregar ciclos de espera ya que la Flash no puede ir tan rapido como el CLK (3 ciclos -> Tabla 5 Manual de Referencia, CAP 3)
     HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0);
 }
 
@@ -270,13 +278,13 @@ static void tim1_pwm_Init(void){
 	//Cargando la configuración en los registros FSR del MCU
 	HAL_TIM_PWM_Init(&htim1);
 
-	//COnfiguración especifica de los Canales CH1, CH2 y CH3
+	//COnfiguración especifica de los Canales CH1, CH2 y CH3 del tim1
 	TIM_OC_InitTypeDef ConfigOC_ch =  {0}; //Estructura Output Compare que configura como funciona cada canal
 
 	ConfigOC_ch.OCMode = TIM_OCMODE_PWM1; //PWM Modo 1: Mientras CNT < CCR la salida está en alto, cuando CNT >= CCR la señal pasa a bajo (CCR (Capture/Compare Register) define el duty)
 	ConfigOC_ch.Pulse = 0; //CCR inicia en 0 (Duty 0%) -> Led inicia apagado
-	ConfigOC_ch.OCNPolarity = TIM_OCPOLARITY_HIGH; //En alto el Led estará encendido, al contrario se invierte la logica
-	ConfigOC_ch.OCFastMode = TIM_OCFAST_DISABLE;
+	ConfigOC_ch.OCPolarity = TIM_OCPOLARITY_HIGH; //En alto el Led estará encendido, al contrario se invierte la logica de las salidas no complementarias (CH1, CH2 y CH3).
+	ConfigOC_ch.OCFastMode = TIM_OCFAST_DISABLE; //Espera a terminar un ciclo para cambiar el duty y que no genere deformaciones en el pulso si se cambia al duty a mitad de un ciclo del pwm
 
 	//Cargando la configuración en los registros FSR del MCU para cada Canal
 	HAL_TIM_PWM_ConfigChannel (&htim1, &ConfigOC_ch, TIM_CHANNEL_1);
@@ -291,7 +299,7 @@ static void tim1_pwm_Init(void){
 
 }
 
-/* Configuración del TIM2 y los 2 Canales de las 2 entradas DT y CLK del encoder */
+/* Configuración del TIM2 (32 bit) y los 2 Canales de las 2 entradas DT y CLK del encoder */
 static void tim2_encoder_Init(void){
 	__HAL_RCC_GPIOA_CLK_ENABLE(); //HAbilitando la señal de reloj del GPIOA (AHB1)
 
@@ -315,24 +323,24 @@ static void tim2_encoder_Init(void){
 
 	htim2.Instance = TIM2;
 	htim2.Init.Prescaler = 0; //No dividirá los pulsos que reciba del encoder
-	htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+	htim2.Init.CounterMode = TIM_COUNTERMODE_UP; //El modo encoder es quien decide hacia donde contar de acuerdo a lo que identifique (CW o CCW)
 	htim2.Init.Period = 65535; //Contará hasta el maximo de la variable que es 16 bit (65535) y luego se desborda de nuevo a 0
 	htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
 	htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-	Config_encmode.EncoderMode = TIM_ENCODERMODE_TI12; // Modo encoder para usar ambos canales (CH1 y CH2) para determinar la dir y los steps
+	Config_encmode.EncoderMode = TIM_ENCODERMODE_TI12; // Modo encoder para usar ambos canales (CH1 y CH2) para determinar la dir y los steps (Por ello se registran 4 pasos por ciclo)
 
 
 	//COnfiguración especifica de los Canales CH1
 	Config_encmode.IC1Polarity = TIM_INPUTCHANNELPOLARITY_RISING; //Polaridad de entrada con flanco de subida para contar
-	Config_encmode.IC1Selection = TIM_ICSELECTION_DIRECTTI; //Canal 1 leerá directamente tambien en canal 2 para saber dir y steps ++ o steps --
+	Config_encmode.IC1Selection = TIM_ICSELECTION_DIRECTTI; //Canal 1 leerá y estará conectado al Pin PA0 respectivo del TIM2 para CH1
 	Config_encmode.IC1Prescaler = TIM_ICPSC_DIV1; //Se reliza captura cada que se detecta un flanco en la señal de entrada del CH1 sin division, todos los flancos
 	Config_encmode.IC1Filter = 30; //Filtro donde deben pasar 30 ciclos para aceptar el cambio de señal para evitar rebotes.
 
 	//COnfiguración especifica de los Canales CH2
 	Config_encmode.IC2Polarity = TIM_INPUTCHANNELPOLARITY_RISING; //Polaridad de entrada con flanco de subida para contar
-	Config_encmode.IC2Selection = TIM_ICSELECTION_DIRECTTI; //Canal 2 leerá directamente tambien en canal 1 para saber dir y steps ++ o steps --
+	Config_encmode.IC2Selection = TIM_ICSELECTION_DIRECTTI; //Canal 2 leerá y estará conectado al Pin PA1 respectivo del TIM2 para CH2
 	Config_encmode.IC2Prescaler = TIM_ICPSC_DIV1; //Se reliza captura cada que se detecta un flanco en la señal de entrada del CH2 sin division, todos los flancos
-	Config_encmode.IC2Filter = 30; //Filtro donde deben pasar 30 ciclos para aceptar el cambiode señal para evitar rebotes.
+	Config_encmode.IC2Filter = 30; //Filtro donde deben pasar 30 ciclos para aceptar el cambio de señal para evitar rebotes.
 
 	//Cargando la configuración en los registros FSR del MCU
 	HAL_TIM_Encoder_Init(&htim2, &Config_encmode);
@@ -368,7 +376,7 @@ static void usart2_Init(void){
 	 __HAL_RCC_USART2_CLK_ENABLE();
 
 	 huart2.Instance = USART2;
-	 huart2.Init.BaudRate = 19200;
+	 huart2.Init.BaudRate = 19200; //19200 bit / segundo, para 8N1 serían aprox 1920 bytes / s (Ya que es formato 8N1 son 1 Start, 8 Datos y 1 Stop (10 Bit)
 	 huart2.Init.Mode = USART_MODE_TX_RX; //Modo transmisión (Tx) y recepcion (Rx)
 	 huart2.Init.Parity = USART_PARITY_NONE;
 	 huart2.Init.StopBits = USART_STOPBITS_1; //1 bit de parada
@@ -376,11 +384,11 @@ static void usart2_Init(void){
 
 	 //Cargando la configuracion en los registros FSR del MCU
 	 HAL_UART_Init(&huart2);
-	 //Registrar la interrupcion en el NVIC
+	 //Registrar la interrupcion en el NVIC para la recepcion Rx
 	 HAL_NVIC_EnableIRQ(USART2_IRQn);
 
 	 //Iniciando la Recepcion
-	 HAL_UART_Receive_IT(&huart2, &rx_data, 1);
+	 HAL_UART_Receive_IT(&huart2, &rx_data, 1); //Guardará el dato en rx_data de a 1 byte
 
 }
 
@@ -412,7 +420,7 @@ static void adc_Init(void){
 		 hadc1.Init.Resolution = ADC_RESOLUTION_12B; //Resolucion de 12 bit (4096 divisiones)
 		 hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
 		 hadc1.Init.ScanConvMode = DISABLE; //Desabilitado el modo escaneo ya que solo se usa un canal del ADC
-		 hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+		 hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV; //Se hace unicamente una conversión porque solo hay un Canal, hace la conversion y la entrega
 		 hadc1.Init.ContinuousConvMode = DISABLE; //Unicamente se hará conversion por medio del TRGO
 		 hadc1.Init.NbrOfConversion = 1; //Solo hay un canal por lo que solo se requiere una conversion
 		 hadc1.Init.DiscontinuousConvMode = DISABLE;
@@ -552,8 +560,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 //Callback de la ISR generada por el USART2 Rx
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart){
 	if (huart->Instance == USART2){
-		//Cargando  el dato de recepcion Rx a la variable
-		//rx_data = husart->Instance->DR;
+
 		usart_done = 1;
 	}
 }
