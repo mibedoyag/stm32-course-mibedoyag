@@ -120,8 +120,8 @@ int main(void)
 {
     HAL_Init();           /* initialize HAL: SysTick, cache, priority grouping */
     SystemClock_Config(); /* configure clock tree: HSI at 16 MHz               */
-    gpio_Init();          /* configure PA5 as push-pull output                  */
-    tim4_Init();          /* configure TIM3: update event every 250 ms          */
+    gpio_Init();          /* configure PH1 as push-pull output                  */
+    tim4_Init();          /* configure TIM4: update event every 250 ms          */
 
     usart2_Init();
     adc_Init();
