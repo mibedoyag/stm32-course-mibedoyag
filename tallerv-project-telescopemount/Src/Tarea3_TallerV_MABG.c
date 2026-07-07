@@ -54,6 +54,7 @@
 #include "stm32f4xx_hal.h"
 #include "stdio.h"
 #include "string.h"
+#include "stdlib.h"
 
 /* TIM1 handle — must be global so stm32f4xx_it.c can access it */
 TIM_HandleTypeDef htim1;
@@ -73,22 +74,36 @@ ADC_HandleTypeDef hadc1 = {0};
 /* USART2 handle — must be global so stm32f4xx_it.c can access it */
 UART_HandleTypeDef huart2 = {0};
 
-volatile uint8_t showMsg = 0; //Variable que se modifica y lleva a la ejecución del Callback del Tim3 Led Estado (PH1) y via pooling envia Tx.
 uint8_t msg_buffer[256] = {0}; //Arerglo donde estará el mensaje dinámico a transmitir USART2 Tx - max 256 caracteres
+uint8_t startupMsg[] =
+"\r\n"
+"========================================\r\n"
+" Tarea 3 - Taller V\r\n"
+"========================================\r\n"
+"Comandos UART:\r\n"
+"  + : Incrementa 1 click\r\n"
+"  - : Decrementa 1 click\r\n"
+"  0 : Reinicia el contador a 0 clicks \r\n"
+"  5 : Incrementa 50 clicks\r\n"
+"========================================\r\n\r\n"; //Mensaje Inicial del UART Tx
 
 
+volatile uint8_t adc_chaged = 0; //Variable volatil que cambia cuando hay un cambio en el valor de ADC para pasar a hacer Tx
 volatile uint16_t raw_adc = 0; //Variable volatil donde se almacena el valor de la conversión ADC
-volatile uint16_t adc_done = 0; //Variable volatil que se modifica y lleva a la ejecución del Callback del ADC
+volatile uint8_t adc_done = 0; //Variable volatil que se modifica y lleva a la ejecución del Callback del ADC
 float adc_value_mv = 0.0f; //Variable donde se guarda y convierte el valor en mV a partir del raw_adc ADC
+uint16_t adc_old = 0; //Varibale con la que se compara el valor del ADC para así saber si se debe transmitir Tx dado el cambio
 
-
+volatile uint8_t encoder_changed = 0; //Variable volatil que cambia cuando hay un cambio en el valor del encoder para pasar a hacer Tx
 volatile int16_t encoder_steps = 0; //Variable dedicada a almacenar los pasos dados y actuales del encoder -> CW ++ y CCW --
 volatile uint8_t encoder_dir = 0; //Variable que indicará la dirección del encoder (0 = CW, 1 = CCW)
 char *dir_string = 0; //Variable tipo string (caracter) que indica CW si es 0 y CCW si es 1 para enviar en Tx USART2
+uint16_t encoder_old = 0; //Varibale con la que se compara el valor del encoder para así saber si se debe transmitir Tx dado el cambio
 
 uint8_t usart_clicks = 0; //Variable dondé estará el número actual de click de acuerdo al comando que reciba de la consola (Rx)
 uint8_t rx_data = 0; //Variable donde se almacena el caracter recibido de la consola para su interpretación
 volatile uint8_t usart_done = 0; //Variable volatil que se modifica y lleva a la ejecución de la lógica del callback por fuera
+volatile uint8_t uart_changed = 0; //Variable volatil que cambia cuando hay una recepción Rx que modifique el PWM para pasar a hacer Tx
 
 volatile uint16_t pwm_red = 0; //Variable que tendra el duty del PWM CH1 (PA8)
 volatile uint16_t pwm_green = 0; //Variable que tendra el duty del PWM CH2 (PA9)
@@ -130,6 +145,9 @@ int main(void)
     tim3_adc_Init();
     mco2_Init ();
 
+
+    HAL_UART_Transmit(&huart2, (uint8_t *)startupMsg,strlen((char *)startupMsg), 500);  //Mensaje Inicial de Funcionamiento de la Recepción Rx via Tx
+
     while (1)
     {
     	switch(currentState){
@@ -137,6 +155,11 @@ int main(void)
     	case STATE_READ_ENCODER:
     		encoder_steps = __HAL_TIM_GET_COUNTER(&htim2) / 4; //Leyendo el valor del contador del TIM2 que maneja el encoder, se divide entre 4 ya que el modo TI12 cuenta todos los flancos (4 por paso de ambos canales 2 por canal (asc y desc)
     		pwm_red = encoder_steps * 5; //Ya que el encoder va de 0 a 100 y el periodo de la señal PWM es del 500 us, se hace la conversión para que el duty vaya de 0 a 500 aproximadamente
+
+    		if (encoder_steps != encoder_old){
+    			encoder_old = encoder_steps; //Se igualan para que encoder_old vaya tenieno el valor actual del encoder
+    			encoder_changed = 1; //Si hay un cambio en el valor del encoder cambia la bandera para actulizar Tx
+    		}
 
     		if (pwm_red > 499) {
 				pwm_red = 499;
@@ -161,6 +184,11 @@ int main(void)
 				pwm_green = (raw_adc * 499) / 4095; //Realizando la conversión del raw_adc en duty para el pwm_green
 
 				__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_green); //Asignando el valor del duty (CCR) del pwm_green al PWM del Canal 1.
+
+				if (abs(raw_adc - adc_old) > 50){  //Se compara la diferencia para evitar salto por ruido que disparen la transmision
+					adc_old = raw_adc;  //Se igualan ambos valores para que adc_old se pueda seguir comparando
+					adc_chaged = 1; //Si hay un cambio significativo en el valor del adc, cambia la bandera para actualizar Tx
+				}
 
 				adc_done = 0; //Limpiando la bandera para que vuelva a entrar
 			}
@@ -199,6 +227,8 @@ int main(void)
 				__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, pwm_blue); //Asignando el valor de PWM del canal 2 que está en pwm_blue (CCR)
 				HAL_UART_Receive_IT(&huart2, &rx_data, 1); //Se vuelve a activar la recepcion de datos ya que cuando recibe algo esta se desactiva y toca volverla a ejercutarla para que espere un nuevo comando
 
+
+				uart_changed = 1; //Si hay un cambio en el valor del clicks recibidos por Rx, cambia la bandera para actualizar Tx
 				usart_done = 0; //Limpiando la bandera para que vuelva a entrar
 			}
 
@@ -207,88 +237,22 @@ int main(void)
 			break;
 
     	case STATE_SEND_MESSAGE:
-			if (showMsg == 1) {
+			if (encoder_changed || adc_chaged || uart_changed) {  //Si hay algún cambio en alguna de estas variables, se ejecuta el if
 				sprintf((char*) msg_buffer,
 						"ADC value = %u raw\n\r" "ADC value = %.0f mV\n\r" "Encoder dir: %s, value = %d\n\r" "UART value = %u clicks\n\r\n\r\n\r",
 						raw_adc, adc_value_mv, dir_string, encoder_steps,
 						usart_clicks);
 				HAL_UART_Transmit(&huart2, msg_buffer,
 						strlen((char*) msg_buffer) - 1, 100);
-				showMsg = 0;
+				encoder_changed = 0;  //Vuelve la bandera a 0 para esperar si se produce otro cambio para transmitir
+				adc_chaged = 0;  //Vuelve la bandera a 0 para esperar si se produce otro cambio para transmitir
+				uart_changed = 0;  //Vuelve la bandera a 0 para esperar si se produce otro cambio para transmitir
 			}
 
 			currentState = STATE_READ_ENCODER; //Reinia la FSM para que se mantenda en bucle ejecutandose un caso tras el otro
 
 			break;
     	}
-
-
-//    	encoder_steps = __HAL_TIM_GET_COUNTER(&htim2) / 4; //Leyendo el valor del contador del TIM2 que maneja el encoder, se divide entre 4 ya que el modo TI12 cuenta todos los flancos (4 por paso de ambos canales 2 por canal (asc y desc)
-//		pwm_red = encoder_steps * 5; //Ya que el encoder va de 0 a 100 y el periodo de la señal PWM es del 500 us, se hace la conversión para que el duty vaya de 0 a 500 aproximadamente
-//
-//		if (__HAL_TIM_IS_TIM_COUNTING_DOWN(&htim2)) { //Leyendo la dirección y asignando el valor en encoder dir y dir_string para enviar por Tx USART2
-//			encoder_dir = 1;
-//			dir_string = "CCW";
-//		} else {
-//			encoder_dir = 0;
-//			dir_string = "CW";
-//		}
-//
-//		if (pwm_red > 499) {
-//			pwm_red = 499;
-//		}
-//
-//		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, pwm_red); //Asignando el nuevo CCR que tiene pwm_red al Canal 3
-
-        /* application loop — LED toggling happens in the callback and Tx USART2*/
-//    	if (showMsg == 1){
-//    		sprintf((char *)msg_buffer, "ADC value = %u raw\n\r" "ADC value = %.0f mV\n\r" "Encoder dir: %s, value = %d\n\r" "UART value = %u clicks\n\r\n\r\n\r", raw_adc, adc_value_mv, dir_string, encoder_steps, usart_clicks);
-//    		HAL_UART_Transmit(&huart2, msg_buffer, strlen((char *)msg_buffer) - 1, 100);
-//    		showMsg = 0;
-//    	}
-
-    	//Hacer algo con el valor de la conversion ADC
-//    	if (adc_done == 1){
-//    		adc_value_mv = (float)((3300.0f / 4095.0f) * raw_adc); //Transformando el valor raw adc en un valor de mV
-//    		pwm_green = (raw_adc * 499) / 4095; //Realizando la conversión del raw_adc en duty para el pwm_green
-//
-//    		__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_green); //Asignando el valor del duty (CCR) del pwm_green al PWM del Canal 1.
-//
-//    		adc_done = 0; //Limpiando la bandera para que vuelva a entrar
-//    	}
-
-    	//Funcion del callback asociado a la interrupcion por Rx de USART2
-//    	if (usart_done == 1){
-//    		if (rx_data == '+'){ //Identificando el carater "+" para que incremente usart_clicks en 1
-//    			if (usart_clicks < 100){
-//    				usart_clicks ++;
-//    			}
-//    		}
-//
-//    		if (rx_data == '-'){ //Identificando el carater "-" para que disminuya usart_clicks en 1
-//    			if(usart_clicks > 0){
-//    				usart_clicks --;
-//    			}
-//    		}
-//
-//    		if (rx_data == '0'){ //Identificando el carater "0" para que lleve la variable usart_clicks a 0
-//    			usart_clicks = 0;
-//    		}
-//
-//    		if (rx_data == '2'){ //Identificando el carater "2" para que incremente usart_clicks en 25
-//    			usart_clicks += 25;
-//
-//    			if(usart_clicks >= 100){
-//    				usart_clicks = 100;
-//    			}
-//    		}
-//
-//    		pwm_blue = usart_clicks * 5; //Ya que usart_clicks va de 0 a 100 y el periodo de la señal PWM es del 500 us, se hace la conversión para que el duty vaya de 0 a 500 aproximadamente
-//    		__HAL_TIM_SET_COMPARE (&htim1, TIM_CHANNEL_2, pwm_blue); //Asignando el valor de PWM del canal 2 que está en pwm_blue (CCR)
-//    		HAL_UART_Receive_IT(&huart2, &rx_data, 1); //Se vuelve a activar la recepcion de datos ya que cuando recibe algo, esta se desactiva y toca volverla a ejercutarla para que espere un nuevo comando
-//
-//    		usart_done = 0; //Limpiando la bandera para que vuelva a entrar
-//    	}
 
 
     }
@@ -656,7 +620,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     if (htim->Instance == TIM4)
     {
         HAL_GPIO_TogglePin(GPIOH, GPIO_PIN_1);
-        showMsg = 1;
+
     }
 }
 

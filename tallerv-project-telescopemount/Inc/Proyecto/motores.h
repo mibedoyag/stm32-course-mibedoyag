@@ -1,0 +1,40 @@
+/**
+ * @file    : motores.h
+ * @author  : Miguel Angel Bedoya G. -> mibedoyag@unal.edu.co
+ * @brief   : Capa de abstracción para el control de actuadores (TMC2208) y lectura de Joystick (ADC).
+ * Calcula la cinemática de los ejes Altitud y Azimut.
+ */
+#ifndef PROYECTO_MOTORES_H
+#define PROYECTO_MOTORES_H
+
+#include <stdint.h>
+
+/* Constantes mecánicas calculadas para correas 3GT y motor 1.8° con 16 micro-pasos */
+#define PULSOS_POR_GRADO_AZIMUT  49.38f  // Relación 100/18
+#define PULSOS_POR_GRADO_ALTITUD 98.76f  // Relación (50/18) * (100/25)
+
+/* Umbral de zona muerta para el joystick analógico (0 - 4095 en STM32 de 12 bits, centro en ~2048) */
+#define JOYSTICK_DEADZONE 200
+
+/* Enumeración para los perfiles de velocidad de los motores */
+typedef enum {
+    SPEED_GUIAR = 0,   // Velocidad mínima (Tracking fine)
+    SPEED_CENTRAR = 1, // Velocidad media (Joystick normal)
+    SPEED_BUSCAR = 2   // Velocidad máxima (GoTo rápido)
+} VelocidadModo_t;
+
+/* Estructura para almacenar las lecturas del ADC del Joystick */
+typedef struct {
+    uint16_t eje_x; // Lectura cruda ADC (Azimut)
+    uint16_t eje_y; // Lectura cruda ADC (Altitud)
+} JoystickData_t;
+
+/* Banderas volátiles externas compartidas (se levantan en las ISR) */
+extern volatile uint8_t flag_adc_joystick_ready;
+
+/* Prototipos de funciones */
+void Motores_InitLogica(void);
+void Motores_UpdateLogica(void);
+void Motores_SetVelocidadGlobal(VelocidadModo_t nueva_velocidad);
+
+#endif // PROYECTO_MOTORES_H
