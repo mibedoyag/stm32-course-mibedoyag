@@ -672,7 +672,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     }
 }
 
-//Callback de la conversion ADC (Unicamente hace la conversión del raw al mV
+//Callback de la conversion ADC (Unicamente hace la conversión del raw al mV)
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 	if (hadc->Instance == ADC1){
 		//Cargando  el dato de la conversion en una variable
@@ -681,7 +681,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 	}
 }
 
-//Callback de la ISR generada por el USART2 Rx
+//Callback de la ISR generada por el UART2 Rx
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart){
 	if (huart->Instance == USART2){
 
