@@ -48,6 +48,38 @@
  * - '0' : Lleva al 0% el Duty Cycle pwm_blue (CH2).
  * - '5' : Lleva al 50% del Duty Cycle pwm_blue (CH2).
  *
+ *
+ * ===================== FUNCIONAMIENTO ===================== *
+ *
+ * El  siguiente programa implementa el control de un LED RGB utilizando tres periféricos
+ * independientes del STM32F411RE:
+ *
+ *  - Un encoder rotativo, configurado mediante el TIM2 en modo Encoder, para
+ *    controlar el duty cycle  del PWM del canal 3 -> pwm_red.
+ *
+ *  - Un potenciómetro, leído mediante el ADC1 disparado periódicamente por el
+ *    evento TRGO generado por el TIM3, para controlar el duty cycle del PWM del
+ *    canal 1 -> pwm_green.
+ *
+ *  - Una comunicación serial UART2, mediante interrupciones de recepción,
+ *    para modificar el duty cycle del PWM del canal 2 -> pwm_blue a partir de comandos
+ *    enviados desde un terminal serial, los cuales se especificaron más arriba debajo
+ *    del mapeo de pines.
+ *
+ * Las tres señales PWM son generadas por el TIM1 utilizando sus canales
+ * CH1, CH2 y CH3 con una frecuencia de 2 kHz y que inician todos en 0.
+ * Adicionalmente, el TIM4 genera una interrupción periódica utilizada
+ * únicamente para el blinky.
+ *
+ * Durante la inicialización se configuran todos los periféricos, se habilitan
+ * las interrupciones correspondientes y se envía un mensaje inicial por UART
+ * con las instrucciones de operación para la recepción Rx de comandos.
+ * Posteriormente, el programa permanece ejecutándose dentro del while, donde
+ * procesa los eventos generados por cada periférico, actualiza las variables
+ * asociadas, modifica los duty cycle de las señales PWM y transmite por UART
+ * el estado actual del sistema únicamente cuando se detecta un cambio significativo
+ * en alguno de los dispositivos de entrada (Encoder, ADC o Rx del UART).
+ *
  ******************************************************************************
  */
 
@@ -75,7 +107,7 @@ ADC_HandleTypeDef hadc1 = {0};
 UART_HandleTypeDef huart2 = {0};
 
 uint8_t msg_buffer[256] = {0}; //Arerglo donde estará el mensaje dinámico a transmitir USART2 Tx - max 256 caracteres
-uint8_t startupMsg[] =
+uint8_t startupMsg[] =   //Mensaje inicial, solo se envía una vez al iniciar el main ()
 "\r\n"
 "========================================\r\n"
 " Tarea 3 - Taller V\r\n"
@@ -105,9 +137,9 @@ uint8_t rx_data = 0; //Variable donde se almacena el caracter recibido de la con
 volatile uint8_t usart_done = 0; //Variable volatil que se modifica y lleva a la ejecución de la lógica del callback por fuera
 volatile uint8_t uart_changed = 0; //Variable volatil que cambia cuando hay una recepción Rx que modifique el PWM para pasar a hacer Tx
 
-volatile uint16_t pwm_red = 0; //Variable que tendra el duty del PWM CH1 (PA8)
-volatile uint16_t pwm_green = 0; //Variable que tendra el duty del PWM CH2 (PA9)
-volatile uint16_t pwm_blue = 0; //Variable que tendra el duty del PWM CH3 (PA10)
+volatile uint16_t pwm_red = 0; //Variable que tendra el duty del PWM CH1 (PA10)
+volatile uint16_t pwm_green = 0; //Variable que tendra el duty del PWM CH2 (PA8)
+volatile uint16_t pwm_blue = 0; //Variable que tendra el duty del PWM CH3 (PA9)
 
 //FSM ejecución while
 typedef enum
@@ -202,21 +234,29 @@ int main(void)
 				if (rx_data == '+') { //Identificando el carater "+" para que incremente usart_clicks en 1
 					if (usart_clicks < 100) {
 						usart_clicks++;
+						uart_changed = 1; //Si hay un cambio en el valor del clicks recibidos por Rx, cambia la bandera para actualizar Tx
+
 					}
 				}
 
 				if (rx_data == '-') { //Identificando el carater "-" para que disminuya usart_clicks en 1
 					if (usart_clicks > 0) {
 						usart_clicks--;
+						uart_changed = 1; //Si hay un cambio en el valor del clicks recibidos por Rx, cambia la bandera para actualizar Tx
+
 					}
 				}
 
 				if (rx_data == '0') { //Identificando el carater "0" para que lleve la variable usart_clicks a 0
 					usart_clicks = 0;
+					uart_changed = 1; //Si hay un cambio en el valor del clicks recibidos por Rx, cambia la bandera para actualizar Tx
+
 				}
 
 				if (rx_data == '5') { //Identificando el carater "5" para que incremente usart_clicks en 50
 					usart_clicks += 50;
+					uart_changed = 1; //Si hay un cambio en el valor del clicks recibidos por Rx, cambia la bandera para actualizar Tx
+
 
 					if (usart_clicks >= 100) {
 						usart_clicks = 100;
@@ -227,8 +267,6 @@ int main(void)
 				__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, pwm_blue); //Asignando el valor de PWM del canal 2 que está en pwm_blue (CCR)
 				HAL_UART_Receive_IT(&huart2, &rx_data, 1); //Se vuelve a activar la recepcion de datos ya que cuando recibe algo esta se desactiva y toca volverla a ejercutarla para que espere un nuevo comando
 
-
-				uart_changed = 1; //Si hay un cambio en el valor del clicks recibidos por Rx, cambia la bandera para actualizar Tx
 				usart_done = 0; //Limpiando la bandera para que vuelva a entrar
 			}
 
@@ -305,7 +343,7 @@ static void gpio_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    /* Enable GPIOA clock on AHB1 bus
+    /* Enable GPIOH clock on AHB1 bus
        Same as bare-metal: RCC->AHB1ENR |= RCC_AHB1ENR_GPIOHEN */
     __HAL_RCC_GPIOH_CLK_ENABLE();
 
@@ -320,7 +358,7 @@ static void gpio_Init(void)
 }
 
 
-/* Configuración del TIM1 y los 3 Canales de las 3 señales PWM (f = 2kHz) */
+/* Configuración del GPIO y TIM1 y los 3 Canales de las 3 señales PWM (f = 2kHz) */
 static void tim1_pwm_Init(void){
 
 	__HAL_RCC_GPIOA_CLK_ENABLE(); //HAbilitando la señal de reloj del GPIOA (AHB1)
@@ -407,7 +445,7 @@ static void tim2_encoder_Init(void){
 	Config_encmode.IC1Polarity = TIM_INPUTCHANNELPOLARITY_RISING; //Polaridad de entrada con flanco de subida para contar
 	Config_encmode.IC1Selection = TIM_ICSELECTION_DIRECTTI; //Canal 1 leerá y estará conectado al Pin PA0 respectivo del TIM2 para CH1
 	Config_encmode.IC1Prescaler = TIM_ICPSC_DIV1; //Se reliza captura cada que se detecta un flanco en la señal de entrada del CH1 sin division, todos los flancos
-	Config_encmode.IC1Filter = 30; //Filtro donde deben pasar 30 ciclos para aceptar el cambio de señal para evitar rebotes.
+	Config_encmode.IC1Filter = 15; //Filtro donde deben pasar 15 (mask max) ciclos para aceptar el cambio de señal para evitar rebotes.
 
 	//COnfiguración especifica de los Canales CH2
 	Config_encmode.IC2Polarity = TIM_INPUTCHANNELPOLARITY_RISING; //Polaridad de entrada con flanco de subida para contar
@@ -430,17 +468,27 @@ static void usart2_Init(void){
 	/* Enable GPIOA clock on AHB1 bus */
 	 __HAL_RCC_GPIOA_CLK_ENABLE();
 
-	 GPIO_InitTypeDef GPIO_Init_Tx_Rx = {0};
+	 GPIO_InitTypeDef GPIO_Init_Tx = {0};
 
-	 GPIO_Init_Tx_Rx.Pin = GPIO_PIN_2 | GPIO_PIN_3; //Pin PA2 (Tx) y PA3 (Rx)
-	 GPIO_Init_Tx_Rx.Mode = GPIO_MODE_AF_PP;
-	 GPIO_Init_Tx_Rx.Pull = GPIO_NOPULL;
-	 GPIO_Init_Tx_Rx.Speed = GPIO_SPEED_FREQ_HIGH;
-	 GPIO_Init_Tx_Rx.Alternate = GPIO_AF7_USART2;
+	 GPIO_Init_Tx.Pin = GPIO_PIN_2; //Pin PA2 (Tx)
+	 GPIO_Init_Tx.Mode = GPIO_MODE_AF_PP;
+	 GPIO_Init_Tx.Pull = GPIO_NOPULL;
+	 GPIO_Init_Tx.Speed = GPIO_SPEED_FREQ_HIGH;
+	 GPIO_Init_Tx.Alternate = GPIO_AF7_USART2;
+
+	 HAL_GPIO_Init(GPIOA, &GPIO_Init_Tx);
+
+	 GPIO_InitTypeDef GPIO_Init_Rx = {0};
+
+	GPIO_Init_Rx.Pin = GPIO_PIN_3; //Pin PA3 (Rx)
+	GPIO_Init_Rx.Mode = GPIO_MODE_AF_PP;
+	GPIO_Init_Rx.Pull = GPIO_PULLUP; //COnfigurando resistencia PullUp para que luego de recibir, el pin quede un estado alto.
+	GPIO_Init_Rx.Speed = GPIO_SPEED_FREQ_HIGH;
+	GPIO_Init_Rx.Alternate = GPIO_AF7_USART2;
 
 
 	 //Cargar la configuracion en los registros FSR del MCU
-	 HAL_GPIO_Init(GPIOA, &GPIO_Init_Tx_Rx);
+	 HAL_GPIO_Init(GPIOA, &GPIO_Init_Rx);
 
 	 __NOP();
 
@@ -580,7 +628,7 @@ static void tim4_Init(void)
     /* Enable TIM4 interrupt line in the NVIC */
     HAL_NVIC_EnableIRQ(TIM4_IRQn);
 
-    /* Start TIM3 in interrupt mode — enables the update event interrupt */
+    /* Start TIM4 in interrupt mode — enables the update event interrupt */
     HAL_TIM_Base_Start_IT(&htim4);
     __NOP();
 
@@ -624,7 +672,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     }
 }
 
-//Callback de la conversion ADC
+//Callback de la conversion ADC (Unicamente hace la conversión del raw al mV
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 	if (hadc->Instance == ADC1){
 		//Cargando  el dato de la conversion en una variable
