@@ -5,8 +5,8 @@
  * Configuración manual de TIM2 (Azimut), TIM3 (Altitud), ADC1 (Joystick) y pines GPIO.
  */
 
-#include "proyecto/motores.h"
-#include "proyecto/interfaz.h"
+#include "Proyecto/motores.h"
+#include "Proyecto/interfaz.h"
 #include "stm32f4xx_hal.h"
 
 /* * Instancias globales de los periféricos.

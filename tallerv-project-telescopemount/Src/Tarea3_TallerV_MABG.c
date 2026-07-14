@@ -213,7 +213,13 @@ int main(void)
     	case STATE_PROCESS_ADC:
 			if (adc_done == 1) {
 				adc_value_mv = (float) ((3300.0f / 4095.0f) * raw_adc); //Transformando el valor raw adc en un valor de mV
-				pwm_green = (raw_adc * 499) / 4095; //Realizando la conversión del raw_adc en duty para el pwm_green
+
+				if (raw_adc < 15){  //Zona muerta para evitar leve parpadeo en el minimo del potenciometro (No llega a 0 Ohm)
+					pwm_green = 0;
+				}
+				else{
+					pwm_green = (raw_adc * 499) / 4095; //Realizan la conversión del raw_adc en duty para el pwm_green
+				}
 
 				__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_green); //Asignando el valor del duty (CCR) del pwm_green al PWM del Canal 1.
 

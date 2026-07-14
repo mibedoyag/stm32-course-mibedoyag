@@ -41,7 +41,7 @@ typedef struct {
 } ObjetoCeleste_t;
 
 /* Prototipos para acceder al catálogo */
-const ObjetoCeleste_t* Astronomia_ObtenerObjeto(uint8_t index);
+const ObjetoCeleste_t* Astronomia_ObtenerObjeto(uint8_t categoria, uint8_t indice);
 uint8_t Astronomia_ObtenerTotalObjetos(void);
 
 /* Variables globales externas para ser leídas por motores.c e interfaz.c */

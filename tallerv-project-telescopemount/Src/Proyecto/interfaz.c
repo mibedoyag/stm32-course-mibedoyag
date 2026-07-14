@@ -1,162 +1,137 @@
-/**
- * @file    : interfaz.c
- * @author  : Miguel A. Bedoya Gonzalez --> mibedoyag@unal.edu.co
- * @brief   : Implementación de la máquina de estados y control de menús LCD.
- */
 #include "Proyecto/interfaz.h"
-// #include "proyecto/motores.h"    // (Se incluirá cuando se implemente la lógica de cambio de velocidad)
-// #include "proyecto/astronomia.h" // (Se incluirá cuando se implemente la compensación SYNC)
+#include "Proyecto/sensores.h" // Para leer imu_actual y obtener hi2c1
+#include <stdio.h>
+#include <string.h>
 
-/* Inicialización estricta de variables globales y banderas en 0 */
-AppState_t currentState = STATE_BOOTING;
+#define LCD_ADDR (0x27 << 1)
 
+static I2C_HandleTypeDef *lcd_i2c;
+SystemState_t currentState = STATE_BOOTING;
+
+/* Definición en memoria de las banderas de los botones */
 volatile uint8_t flag_btn_select = 0;
 volatile uint8_t flag_btn_sync = 0;
 volatile uint8_t flag_btn_speed = 0;
-volatile int16_t encoder_diff = 0;
 
-/* Variables estáticas locales para el control interno de menús */
-static uint8_t menu_main_index = 0;    // Índice del menú principal (0:Offline, 1:Online, 2:Manual)
-static uint8_t menu_offline_index = 0; // Índice del submenú de catálogos
-static uint8_t tracking_activo = 0;    // Bandera lógica de tracking (0: OFF, 1: ON)
-
-/**
- * @brief Inicializa las variables lógicas de la interfaz a sus valores seguros.
- */
-void Interfaz_InitLogica(void) {
-    currentState = STATE_BOOTING;
-    flag_btn_select = 0;
-    flag_btn_sync = 0;
-    flag_btn_speed = 0;
-    encoder_diff = 0;
-    menu_main_index = 0;
-    menu_offline_index = 0;
-    tracking_activo = 0;
+/* =========================================================================
+ * DRIVER LCD (Se mantiene igual)
+ * ========================================================================= */
+static void LCD_SendCommand(uint8_t cmd) {
+    uint8_t data_u, data_l;
+    uint8_t data_t[4];
+    data_u = (cmd & 0xf0);
+    data_l = ((cmd << 4) & 0xf0);
+    data_t[0] = data_u | 0x0C;
+    data_t[1] = data_u | 0x08;
+    data_t[2] = data_l | 0x0C;
+    data_t[3] = data_l | 0x08;
+    HAL_I2C_Master_Transmit(lcd_i2c, LCD_ADDR, data_t, 4, 100);
 }
 
-/**
- * @brief Actualiza la máquina de estados evaluando las banderas de hardware.
- * Debe ejecutarse constantemente dentro del Montura_Loop().
- */
-void Interfaz_UpdateFSM(void) {
+static void LCD_SendData(uint8_t data) {
+    uint8_t data_u, data_l;
+    uint8_t data_t[4];
+    data_u = (data & 0xf0);
+    data_l = ((data << 4) & 0xf0);
+    data_t[0] = data_u | 0x0D;
+    data_t[1] = data_u | 0x09;
+    data_t[2] = data_l | 0x0D;
+    data_t[3] = data_l | 0x09;
+    HAL_I2C_Master_Transmit(lcd_i2c, LCD_ADDR, data_t, 4, 100);
+}
 
-    // ------------------------------------------------------------------
-    // 1. Procesamiento de botones globales (Independientes del estado)
-    // ------------------------------------------------------------------
-    if (flag_btn_speed == 1) {
-        flag_btn_speed = 0; // Limpiar bandera inmediatamente
+void LCD_Clear(void) {
+    LCD_SendCommand(0x01);
+    HAL_Delay(2);
+}
 
-        // TODO: Llamar a Motores_SetVelocidadGlobal() para ciclar perfiles.
-        // Si estamos en STATE_MANUAL, actualizar la LCD con "Vel: MEDIA/ALTA".
+void LCD_Print(uint8_t row, uint8_t col, char *str) {
+    uint8_t pos = (row == 0) ? (0x80 | col) : (0xC0 | col);
+    LCD_SendCommand(pos);
+    while (*str) {
+        LCD_SendData(*str++);
     }
+}
 
-    // ------------------------------------------------------------------
-    // 2. Máquina de Estados Principal
-    // ------------------------------------------------------------------
+/* =========================================================================
+ * RENOMBRADO PARA COINCIDIR CON main_logic.c
+ * ========================================================================= */
+void Interfaz_InitLogica(void) {
+    lcd_i2c = &hi2c1;
+
+    // Incrementamos el delay inicial drásticamente (de 50ms a 150ms)
+    // para darle tiempo al regulador de la pantalla de estabilizar sus 5V.
+    HAL_Delay(150);
+
+    // Secuencia de inicialización robusta de 4 bits con tiempos de espera holgados
+    LCD_SendCommand(0x30); HAL_Delay(10); // Comando de reinicio
+    LCD_SendCommand(0x30); HAL_Delay(5);  // Repetición del comando
+    LCD_SendCommand(0x30); HAL_Delay(5);  // Confirmación
+    LCD_SendCommand(0x20); HAL_Delay(10); // Forzar cambio físico a modo 4-bits
+
+    // Ahora que está en 4-bits seguros, enviamos la parametrización
+    LCD_SendCommand(0x28); HAL_Delay(2);  // 2 líneas, fuente 5x8
+    LCD_SendCommand(0x08); HAL_Delay(2);  // Apagar display para configurar
+    LCD_SendCommand(0x01); HAL_Delay(5);  // Limpiar memoria DDRAM (requiere bastante tiempo)
+    LCD_SendCommand(0x06); HAL_Delay(2);  // Dirección del cursor: Incremento
+    LCD_SendCommand(0x0C); HAL_Delay(2);  // Encender pantalla, apagar cursor
+}
+
+void Interfaz_UpdateFSM(void) {
+    char linea1[20];
+    char linea2[20];
+
+    static uint32_t ultimo_refresco = 0;
+    if (HAL_GetTick() - ultimo_refresco < 250) {
+        return;
+    }
+    ultimo_refresco = HAL_GetTick();
+
     switch (currentState) {
-
         case STATE_BOOTING:
-            // TODO: Mostrar "Homing..." en la pantalla LCD.
-            // Una vez los motores toquen los finales de carrera y el GPS tenga Fix:
-            // Por ahora, simulamos una transición inmediata al menú principal.
-            currentState = STATE_MENU_MAIN;
-            break;
-
-        case STATE_MENU_MAIN:
-            // Navegación del menú con el Encoder (TIM4)
-            if (encoder_diff != 0) {
-                // TODO: Limitar y ajustar menu_main_index entre 0 y 2.
-                encoder_diff = 0; // Consumir el diferencial
-                // TODO: Refrescar la LCD con la opción seleccionada.
-            }
-
-            // Ingreso a un submodo con el botón SELECT
-            if (flag_btn_select == 1) {
-                flag_btn_select = 0; // Limpiar bandera
-
-                if (menu_main_index == 0) {
-                    currentState = STATE_OFFLINE;
-                    menu_offline_index = 0; // Reiniciar vista del submenú
-                    // TODO: Dibujar menú de catálogo (Messier, etc.) en LCD.
-                }
-                else if (menu_main_index == 1) {
-                    currentState = STATE_ONLINE;
-                    // TODO: Dibujar "Esperando LX200..." en LCD.
-                }
-                else if (menu_main_index == 2) {
-                    currentState = STATE_MANUAL;
-                    tracking_activo = 0; // Seguridad: Ingresar con motores apagados.
-                    // TODO: Dibujar vista Manual (Trk:OFF Vel:XXX) en LCD.
-                }
-            }
-            break;
-
-        case STATE_OFFLINE:
-            // Navegación por el catálogo de objetos astronómicos
-            if (encoder_diff != 0) {
-                // TODO: Avanzar retroceder en el arreglo de estrellas/Messier
-                encoder_diff = 0;
-            }
-
-            // Ejecutar GoTo al objeto seleccionado o retornar al Menú Principal
-            if (flag_btn_select == 1) {
-                flag_btn_select = 0;
-                // TODO: Si seleccionó "< Volver", currentState = STATE_MENU_MAIN;
-                // TODO: Sino, llamar Astronomia_CalcularAltAz() y mover motores.
-            }
-
-            // Compensación geométrica en lazo cerrado
-            if (flag_btn_sync == 1) {
-                flag_btn_sync = 0;
-                // TODO: Llamar a Astronomia_SyncOffset() comparando encoders AS5600.
-                // TODO: Mostrar "[Sincronizado!]" temporalmente.
-            }
-            break;
-
-        case STATE_ONLINE:
-            // Modo esclavo: El flujo lo dicta el puerto UART2 (LX200)
-
-            // Abortar modo online y volver al inicio
-            if (flag_btn_select == 1) {
-                flag_btn_select = 0;
-                currentState = STATE_MENU_MAIN;
-                // TODO: Refrescar la LCD.
-            }
-
-            // Corrección de error de apuntado enviada físicamente (útil si Stellarium falla por unos grados)
-            if (flag_btn_sync == 1) {
-                flag_btn_sync = 0;
-                // TODO: Llamar a Astronomia_SyncOffset().
+            LCD_Print(0, 0, "ASTRO-MOUNT v1.0");
+            if (gps_actual.latitud != 0.0f) {
+                currentState = STATE_MANUAL;
+                LCD_Clear();
+            } else {
+                LCD_Print(1, 0, "Buscando GPS... ");
             }
             break;
 
         case STATE_MANUAL:
-            // Movimiento puro comandado por el Joystick y JoystickData_t.
+		// Línea 1: "Z:359.9 Y:-179.9" -> Exactamente 16 caracteres
+		// Z = Azimut (orientacion_z), Y = Altura (inclinacion_y)
+		sprintf(linea1, "Z:%5.1f  Y:%5.1f", imu_actual.orientacion_z,
+				imu_actual.inclinacion_y);
+		LCD_Print(0, 0, linea1);
 
-            // Alternar Tracking Inverso con el botón SELECT (Menú Contextual)
-            if (flag_btn_select == 1) {
-                flag_btn_select = 0;
+		// Línea 2: "M:06.2N  -075.5W" -> Exactamente 16 caracteres
+		// M = Manual, seguido de las coordenadas formateadas
+		{
+			char dir_lat = (gps_actual.latitud >= 0) ? 'N' : 'S';
+			char dir_lon = (gps_actual.longitud >= 0) ? 'E' : 'W';
 
-                if (tracking_activo == 0) {
-                    tracking_activo = 1;
-                    // TODO: Calcular RA/Dec inverso según posición actual y encender TIMers.
-                } else {
-                    tracking_activo = 0;
-                    // TODO: Apagar seguimiento.
-                }
-                // TODO: Actualizar texto "Trk:ON" o "Trk:OFF" en LCD.
-            }
+			// Usamos fabs() para mostrar el valor absoluto ya que la dirección 'S' o 'W' da el contexto del signo
+			float lat_abs =
+					(gps_actual.latitud < 0) ?
+							-gps_actual.latitud : gps_actual.latitud;
+			float lon_abs =
+					(gps_actual.longitud < 0) ?
+							-gps_actual.longitud : gps_actual.longitud;
 
-            // Guardar punto de interés manual
-            if (flag_btn_sync == 1) {
-                flag_btn_sync = 0;
-                // TODO: Ejecutar corrección local.
-            }
+			sprintf(linea2, "M:%4.1f%c  %5.1f%c", lat_abs, dir_lat, lon_abs,
+					dir_lon);
+			LCD_Print(1, 0, linea2);
+		}
+		break;
+        case STATE_TRACKING:
+            LCD_Print(0, 0, "MODO SEGUIMIENTO");
+            LCD_Print(1, 0, "Objetivo fijado.");
             break;
 
-        default:
-            // Mecanismo de seguridad (Failsafe) en caso de corrupción de estado
-            currentState = STATE_BOOTING;
+        case STATE_ERROR:
+            LCD_Print(0, 0, "ERROR DE SISTEMA");
+            LCD_Print(1, 0, "Revise sensores ");
             break;
     }
 }

@@ -8,6 +8,14 @@
 #include "Proyecto/motores.h"
 #include "Proyecto/sensores.h"
 #include "Proyecto/astronomia.h"
+#include "stm32f4xx_hal.h"
+
+
+/* Definición de los pines físicos para los botones de interrupción (EXTI) */
+#define BTN_SYNC_Pin   GPIO_PIN_0 // Supongamos que lo conectas al PA0/PB0/PC0
+#define BTN_SELECT_Pin GPIO_PIN_1 // Supongamos que lo conectas al PA1/PB1/PC1
+#define BTN_SPEED_Pin  GPIO_PIN_2 // Supongamos que lo conectas al PA2/PB2/PC2
+
 
 /**
  * @brief Inicializa todos los subsistemas lógicos.
@@ -56,29 +64,37 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
     }
 }
 
-/**
- * @brief  Callback de finalización de conversión ADC (Joystick)
- */
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
-    if (hadc->Instance == ADC1) {
-        // Obtenemos los valores convertidos por DMA o registro
-        // joystick_actual.eje_x = HAL_ADC_GetValue(&hadc1);
-        // joystick_actual.eje_y = ...
-
-        flag_adc_joystick_ready = 1; // Bandera definida en motores.c
-    }
-}
+///**
+// * @brief  Callback de finalización de conversión ADC (Joystick)
+// */
+//void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
+//    if (hadc->Instance == ADC1) {
+//        // Obtenemos los valores convertidos por DMA o registro
+//        // joystick_actual.eje_x = HAL_ADC_GetValue(&hadc1);
+//        // joystick_actual.eje_y = ...
+//
+//        flag_adc_joystick_ready = 1; // Bandera definida en motores.c
+//    }
+//}
 
 /**
  * @brief  Callback de recepción de UART (GPS)
  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-    if (huart->Instance == USART1) { // GPS
-        // Lógica de llenado de buffer circular
-        // Si detectamos '\n':
-        flag_gps_trama_lista = 1; // Bandera definida en sensores.c
+	if (huart->Instance == USART1) {
 
-        // Re-activar la interrupción para el siguiente caracter
-        HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
-    }
+		// Evitar desbordamiento del buffer
+		if (gps_rx_index < GPS_BUFFER_SIZE - 1) {
+			gps_rx_buffer[gps_rx_index] = (char) rx_byte;
+			gps_rx_index++;
+		}
+
+		// Si detectamos el salto de línea, la trama NMEA está completa
+		if (rx_byte == '\n') {
+			flag_gps_trama_lista = 1;
+		}
+
+		// Reactivar la interrupción para el siguiente carácter
+		HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+	}
 }
