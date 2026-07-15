@@ -16,9 +16,10 @@
 
 /* Estructura para almacenar los ángulos de orientación de la IMU (BNO055) */
 typedef struct {
-    float orientacion_z; // Yaw (Azimut magnético: 0 a 360 grados)
+    float orientacion_z; // Yaw (Azimut Verdadero compensado: 0 a 360 grados)
     float inclinacion_y; // Pitch (Altitud del tubo: -180 a +180 grados)
     float roll_x;        // Roll (Alabeo: útil para nivelación de la base: -90 a +90)
+    int8_t temperatura;  // Temperatura interna del chip en °C
 } DatosIMU_t;
 
 /* ====================================================================

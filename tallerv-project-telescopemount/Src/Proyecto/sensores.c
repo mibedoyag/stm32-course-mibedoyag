@@ -24,8 +24,16 @@ uint8_t rx_byte = 0;
 
 DatosIMU_t imu_actual = {0.0f, 0.0f, 0.0f};
 
-/* Dirección del módulo BNO055 (Clon GY-BNO055 con pin ADR al aire = 0x29) */
+/* Dirección del módulo BNO055 (Clon GY-BNO055 con pin ADD al aire = 0x29) */
 #define BNO055_ADDR (0x29 << 1)
+
+/* =========================================================================
+ * PARÁMETROS GEOGRÁFICOS LOCALES
+ * ========================================================================= */
+/* Declinación magnética (~-6.5° Oeste en Medellín).
+ * Se suma al norte magnético para hallar el norte verdadero. */
+
+#define DECLINACION_MAG_LOCAL (-6.5f)
 
 /* =========================================================================
  * 1. CONFIGURACIÓN DE HARDWARE DE BAJO NIVEL
@@ -183,15 +191,33 @@ void Sensores_ProcesarDatos(void) {
     // B. PROCESAMIENTO IMU (BNO055)
     // ----------------------------------------------------------------
     uint8_t data_euler[6];
+    uint8_t temp_raw = 0;
 
-    // Lectura de la IMU usando hi2c2
+    // 1. Lectura de los ángulos de Euler
     if (HAL_I2C_Mem_Read(&hi2c2, BNO055_ADDR, 0x1A, 1, data_euler, 6, 10) == HAL_OK) {
         int16_t yaw_raw   = (int16_t)((data_euler[1] << 8) | data_euler[0]);
         int16_t roll_raw  = (int16_t)((data_euler[3] << 8) | data_euler[2]);
         int16_t pitch_raw = (int16_t)((data_euler[5] << 8) | data_euler[4]);
 
-        imu_actual.orientacion_z = (float)yaw_raw / 16.0f;
+        float azimut_magnetico = (float)yaw_raw / 16.0f;
+
+        // CÁLCULO DEL NORTE VERDADERO
+        float azimut_verdadero = azimut_magnetico + DECLINACION_MAG_LOCAL;
+
+        // Normalizamos el ángulo para que siempre esté entre 0° y 360°
+        if (azimut_verdadero < 0.0f) {
+            azimut_verdadero += 360.0f;
+        } else if (azimut_verdadero >= 360.0f) {
+            azimut_verdadero -= 360.0f;
+        }
+
+        imu_actual.orientacion_z = azimut_verdadero;
         imu_actual.roll_x        = (float)roll_raw / 16.0f;
         imu_actual.inclinacion_y = (float)pitch_raw / 16.0f;
+    }
+
+    // 2. Lectura de la temperatura interna (Registro 0x34)
+    if (HAL_I2C_Mem_Read(&hi2c2, BNO055_ADDR, 0x34, 1, &temp_raw, 1, 10) == HAL_OK) {
+        imu_actual.temperatura = (int8_t)temp_raw;
     }
 }
