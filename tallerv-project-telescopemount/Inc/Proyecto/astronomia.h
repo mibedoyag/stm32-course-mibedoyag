@@ -23,15 +23,6 @@ typedef struct {
     float azimut;   // Azimut local calculado en grados
 } Coordenadas_t;
 
-/* Estructura para los datos extraídos de la trama NMEA del GPS */
-typedef struct {
-    float latitud;  // Grados decimales (+ Norte, - Sur)
-    float longitud; // Grados decimales (+ Este, - Oeste)
-    uint16_t anio;
-    uint8_t mes;
-    uint8_t dia;
-    float ut_horas; // Hora UTC en formato decimal (ej. 14.5 para 14:30)
-} DatosGPS_t;
 
 /* Estructura para objetos celestes del catálogo */
 typedef struct {
@@ -47,7 +38,6 @@ uint8_t Astronomia_ObtenerTotalObjetos(void);
 /* Variables globales externas para ser leídas por motores.c e interfaz.c */
 extern Coordenadas_t target_actual;
 extern Coordenadas_t offset_calibracion;
-extern DatosGPS_t gps_actual;
 
 /* Prototipos de funciones */
 void Astronomia_InitLogica(void);

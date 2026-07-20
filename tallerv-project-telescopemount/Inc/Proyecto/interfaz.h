@@ -1,7 +1,7 @@
 /**
  * @file    : interfaz.h
  * @author  : Miguel A. Bedoya Gonzalez --> mibedoyag@unal.edu.co
- * @brief   : Cabecera del gestor de Interfaz (Pantalla LCD y Máquina de Estados).
+ * @brief   : Cabecera del gestor de Interfaz (Pantalla LCD, Encoder, Botones y FSM).
  */
 #ifndef PROYECTO_INTERFAZ_H
 #define PROYECTO_INTERFAZ_H
@@ -22,8 +22,12 @@ typedef enum {
 extern SystemState_t currentState;
 
 /* ====================================================================
- * 2. BANDERAS DE BOTONES EXTERNOS (Para main_logic.c)
+ * 2. VARIABLES DE CONTROLES (ENCODER Y BOTONES)
  * ==================================================================== */
+/* El valor actual del encoder rotativo (Aumenta o disminuye al girar) */
+extern volatile int32_t encoder_contador;
+
+/* Banderas volátiles externas compartidas (se levantan en las ISR) */
 extern volatile uint8_t flag_btn_select;
 extern volatile uint8_t flag_btn_sync;
 extern volatile uint8_t flag_btn_speed;
@@ -31,8 +35,9 @@ extern volatile uint8_t flag_btn_speed;
 /* ====================================================================
  * 3. PROTOTIPOS DE LA INTERFAZ
  * ==================================================================== */
+void Interfaz_Controles_Init(void); // Inicializa Timer del Encoder y EXTI
+void Interfaz_LeerEncoder(void);    // Lee el registro del TIM4
 
-// Nombres actualizados para coincidir con main_logic.c
 void Interfaz_InitLogica(void);
 void Interfaz_UpdateFSM(void);
 

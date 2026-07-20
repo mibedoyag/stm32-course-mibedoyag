@@ -1,71 +1,97 @@
 /**
  * @file    : stm32f4xx_it.c
- * @brief   : Rutinas de servicio de interrupción (ISR)
+ * @brief   : Rutinas de servicio de interrupción (ISR) y DMA
  * @author  : Miguel Angel Bedoya G. --> mibedoyag@unal.edu.co
  */
 
 #include "stm32f4xx_hal.h"
 
 /* ====================================================================
- * NOTA DE FASE 1:
- * Los Handles para TIM4 (Encoder), USART1 (GPS) y USART2 (PC)
- * se irán agregando aquí mediante 'extern' conforme vayamos
- * construyendo esos módulos. Por ahora, los omitimos para
- * evitar errores de "Undefined Reference" en el enlazador.
+ * HANDLES EXTERNOS DE LOS PERIFÉRICOS
+ * Referencias a las configuraciones creadas en motores.c y sensores.c
  * ==================================================================== */
 
-/* Declarar el handle que configuramos en sensores.c */
+/* Handles del GPS (UART + DMA) -> Vienen de sensores.c */
 extern UART_HandleTypeDef huart1;
+extern DMA_HandleTypeDef hdma_usart1_rx;
 
-/* Declarar el handle de TIM4 — definido en main.c */
+/* Handles del Joystick (ADC + DMA) -> Vienen de motores.c */
+extern ADC_HandleTypeDef hadc1;
+extern DMA_HandleTypeDef hdma_adc1;
+
+/* Handle del Encoder Rotativo -> Viene de interfaz.c */
 extern TIM_HandleTypeDef htim4;
 
-/* Manejador de SysTick — requerido por la HAL para HAL_Delay() y timeouts base */
-void SysTick_Handler(void)
-{
+/* Handle del TIM10 para el blinky en main.c */
+extern TIM_HandleTypeDef htim10;
+
+/* ====================================================================
+ * INTERRUPCIONES DEL SISTEMA BASE
+ * ==================================================================== */
+
+/* Manejador de SysTick — requerido por la HAL*/
+void SysTick_Handler(void) {
     HAL_IncTick();
 }
 
-/* --------------------------------------------------------------------
+/* ====================================================================
  * INTERRUPCIONES EXTERNAS (EXTI) - Botones de la Interfaz
- * -------------------------------------------------------------------- */
+ * ==================================================================== */
 
-/* Manejador para la línea EXTI 0 (Ej. Botón SYNC en PA0, PB0 o PC0) */
-void EXTI0_IRQHandler(void)
-{
-    HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0);
+/**
+ * @brief Manejador de interrupciones para pines del 10 al 15.
+ * Aquí caen los tres botones de control agrupados en el puerto B.
+ */
+void EXTI15_10_IRQHandler(void) {
+    // PB12: Botón SPEED
+    HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_12);
+    // PB13: Botón SYNC
+    HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_13);
+    // PB14: Botón SELECT (Hundir el Encoder)
+    HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_14);
 }
 
-/* Manejador para la línea EXTI 1 (Ej. Botón SELECT en PA1, PB1 o PC1) */
-void EXTI1_IRQHandler(void)
-{
-    HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_1);
+/* ====================================================================
+ * INTERRUPCIONES DE ACCESO DIRECTO A MEMORIA (DMA)
+ * ==================================================================== */
+
+/**
+ * @brief Vector del DMA2 Stream 0 -> Encargado de actualizar el Joystick (ADC1)
+ */
+void DMA2_Stream0_IRQHandler(void) {
+    HAL_DMA_IRQHandler(&hdma_adc1);
 }
 
-/* Manejador para la línea EXTI 2 (Ej. Botón SPEED en PA2, PB2 o PC2) */
-void EXTI2_IRQHandler(void)
-{
-    HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_2);
+/**
+ * @brief Vector del DMA2 Stream 5 -> Encargado de recibir el GPS (USART1_RX)
+ */
+void DMA2_Stream5_IRQHandler(void) {
+    HAL_DMA_IRQHandler(&hdma_usart1_rx);
 }
 
-/* Manejador del evento de actualización de TIM4 */
+/* ====================================================================
+ * INTERRUPCIONES DE PERIFÉRICOS (UART / TIMERS)
+ * ==================================================================== */
 
-void TIM4_IRQHandler(void)
-{
-
-HAL_TIM_IRQHandler(&htim4);
-
-}
-
-
-/* Despachador de la interrupción del GPS */
-void USART1_IRQHandler(void)
-{
+/**
+ * @brief Despachador de la interrupción del GPS (Útil para control de errores de línea)
+ */
+void USART1_IRQHandler(void) {
     HAL_UART_IRQHandler(&huart1);
 }
 
-/* * NOTA SOBRE EL ADC:
- * Como implementamos la lectura del Joystick mediante Polling manual optimizado
- * en motores.c (sin bloqueos de sistema), la rutina ADC_IRQHandler ya no
- * es necesaria y la eliminamos para ahorrar ciclos de reloj y memoria.
+/**
+ * @brief Manejador del evento de actualización de TIM4 (Encoder Rotativo)
  */
+void TIM4_IRQHandler(void) {
+    HAL_TIM_IRQHandler(&htim4);
+}
+
+/**
+  * @brief This function handles TIM1 Update interrupt and TIM10 global interrupt.
+  */
+void TIM1_UP_TIM10_IRQHandler(void)
+{
+  // Le pasamos el control a la HAL para que limpie banderas y llame al Callback
+  HAL_TIM_IRQHandler(&htim10);
+}

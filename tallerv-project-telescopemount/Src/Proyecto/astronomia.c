@@ -4,12 +4,13 @@
  * @brief   : Implementación de los cálculos de trigonometría esférica.
  */
 #include "Proyecto/astronomia.h"
+#include "Proyecto/sensores.h"
+#include "math.h"
 
 /* Inicialización estricta de estructuras a 0 */
 Coordenadas_t target_actual = {0.0f, 0.0f, 0.0f, 0.0f};
 Coordenadas_t offset_calibracion = {0.0f, 0.0f, 0.0f, 0.0f};
 
-DatosGPS_t gps_actual = {0.0f, 0.0f, 0, 0, 0, 0.0f};
 
 /* Catálogo Messier (M1 - M20) */
 const ObjetoCeleste_t catalogo_messier[] = {
