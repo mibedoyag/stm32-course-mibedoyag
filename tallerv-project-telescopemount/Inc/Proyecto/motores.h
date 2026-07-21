@@ -37,4 +37,25 @@ void Motores_InitLogica(void);
 void Motores_UpdateLogica(void);
 void Motores_SetVelocidadGlobal(VelocidadModo_t nueva_velocidad);
 
+/* =========================================================================
+ * VARIABLES GLOBALES DEL CONTROL DE POSICIÓN (GoTo)
+ * ========================================================================= */
+// Banderas para la FSM (1 = Terminado / En reposo, 0 = Moviéndose)
+extern volatile uint8_t flag_goto_terminado_az;
+extern volatile uint8_t flag_goto_terminado_alt;
+
+// API de Posicionamiento
+void Motores_Apuntar(float azimut_target, float altitud_target);
+void Motores_DetenerGoTo(void);
+
+/* =========================================================================
+ * RUTINA DE CALIBRACIÓN INICIAL (HOMING)
+ * ========================================================================= */
+// Esta bandera ahora pertenece a los motores y será leída por la FSM de la interfaz
+extern volatile uint8_t flag_homing_ok;
+
+// Funciones de Homing
+void Motores_IniciarHoming(void);
+void Motores_UpdateHoming(void);
+
 #endif // PROYECTO_MOTORES_H

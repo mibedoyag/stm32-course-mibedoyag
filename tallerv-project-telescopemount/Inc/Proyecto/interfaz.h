@@ -3,45 +3,41 @@
  * @author  : Miguel A. Bedoya Gonzalez --> mibedoyag@unal.edu.co
  * @brief   : Cabecera del gestor de Interfaz (Pantalla LCD, Encoder, Botones y FSM).
  */
+
 #ifndef PROYECTO_INTERFAZ_H
 #define PROYECTO_INTERFAZ_H
 
+#include <stdint.h>
 #include "stm32f4xx_hal.h"
-#include "Proyecto/astronomia.h" // ¡Crucial para que reconozca gps_actual!
 
-/* ====================================================================
- * 1. MÁQUINA DE ESTADOS DEL SISTEMA
- * ==================================================================== */
+// Definición de todos los estados de la interfaz
 typedef enum {
-    STATE_BOOTING,
-    STATE_MANUAL,
-    STATE_TRACKING,
-    STATE_ERROR
+    STATE_BOOTING = 0,         // Buscando GPS y Homing
+    STATE_BOOT_SUCCESS,        // Muestra satélites y hora
+    STATE_MAIN_MENU,           // Menú Principal
+    STATE_MANUAL,              // Modo Manual (Joystick)
+    STATE_OFFLINE_CATALOGO,    // Selección de Catálogo (Messier/Planetas)
+    STATE_OFFLINE_OBJETO,      // Selección de Objeto celeste
+    STATE_OFFLINE_ACCION,      // Selección de acción (Apuntar/Seguir)
+	STATE_MOVIENDO,
+    STATE_TRACKING,            // Modo de seguimiento activo
+    STATE_ONLINE,              // Comunicación UART con Stellarium/SkySafari
+    STATE_INFO,                // Pantalla de información (GPS + Euler)
+    STATE_ERROR                // Error crítico de hardware
 } SystemState_t;
 
+// Variables globales exportadas
 extern SystemState_t currentState;
+extern volatile uint8_t flag_homing_ok; // Definida en motores.c (1 cuando termine el home)
 
-/* ====================================================================
- * 2. VARIABLES DE CONTROLES (ENCODER Y BOTONES)
- * ==================================================================== */
-/* El valor actual del encoder rotativo (Aumenta o disminuye al girar) */
-extern volatile int32_t encoder_contador;
-
-/* Banderas volátiles externas compartidas (se levantan en las ISR) */
-extern volatile uint8_t flag_btn_select;
-extern volatile uint8_t flag_btn_sync;
-extern volatile uint8_t flag_btn_speed;
-
-/* ====================================================================
- * 3. PROTOTIPOS DE LA INTERFAZ
- * ==================================================================== */
-void Interfaz_Controles_Init(void); // Inicializa Timer del Encoder y EXTI
-void Interfaz_LeerEncoder(void);    // Lee el registro del TIM4
-
+// Prototipos de funciones
 void Interfaz_InitLogica(void);
 void Interfaz_UpdateFSM(void);
+void Interfaz_Controles_Init(void);
+void Interfaz_LeerEncoder(void);
 
-void LCD_Print(uint8_t row, uint8_t col, char *str);
+// Funciones nativas de la LCD
 void LCD_Clear(void);
+void LCD_Print(uint8_t row, uint8_t col, char *str);
 
 #endif // PROYECTO_INTERFAZ_H

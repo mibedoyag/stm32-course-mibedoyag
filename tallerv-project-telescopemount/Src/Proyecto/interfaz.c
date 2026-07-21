@@ -1,222 +1,582 @@
 #include "Proyecto/interfaz.h"
 #include "Proyecto/sensores.h"
+#include "Proyecto/astronomia.h"
+#include "Proyecto/motores.h"
 #include <stdio.h>
 #include <string.h>
 
 #define LCD_ADDR (0x27 << 1)
 
 static I2C_HandleTypeDef *lcd_i2c;
-TIM_HandleTypeDef htim4; // Handle para el Timer 4 (Modo Encoder)
+TIM_HandleTypeDef htim4;
 
 SystemState_t currentState = STATE_BOOTING;
+//volatile uint8_t flag_homing_ok = 1; // Simulamos la variable que vendrá de motores.c
 
-/* Definición en memoria de las variables de los controles */
+/* Variables volátiles de los controles */
 volatile int32_t encoder_contador = 0;
-volatile uint8_t flag_btn_select = 0;
+//volatile uint8_t flag_btn_select = 0;
 volatile uint8_t flag_btn_sync = 0;
 volatile uint8_t flag_btn_speed = 0;
 
-/* =========================================================================
- * DRIVER LCD
- * ========================================================================= */
+/* Variables para la navegación de la FSM */
+static int32_t ultimo_encoder = 0; // Para calcular diferencias de movimiento
+static uint32_t boot_timer = 0;    // Temporizador para la pantalla de éxito
+static uint8_t menu_index = 0;     // Índice genérico de menús
+//static uint32_t ultimo_boton_tick = 0; // Para el Anti-Rebote del botón
 
-// NUEVA FUNCIÓN: Envía solo 4 bits. Obligatorio para el despertar del LCD.
+/* Variables para recordar selecciones de Astronomía */
+static uint8_t catalogo_seleccionado = 0; // 0 = Messier, 1 = Estrellas
+static uint8_t objeto_seleccionado = 0;   // Índice del 0 al 19 (o 9)
+static uint8_t total_objetos_actual = 20; // Tamaño del catálogo actual
+
+/* =========================================================================
+ * DRIVERS DE LA LCD (Se mantienen idénticos a los tuyos)
+ * ========================================================================= */
 static void LCD_SendNibble(uint8_t nibble) {
-    uint8_t data_t[2];
-    data_t[0] = (nibble & 0xF0) | 0x0C; // EN=1, RS=0
-    data_t[1] = (nibble & 0xF0) | 0x08; // EN=0, RS=0
-    HAL_I2C_Master_Transmit(lcd_i2c, LCD_ADDR, data_t, 2, 100);
+	uint8_t data_t[2];
+	data_t[0] = (nibble & 0xF0) | 0x0C;
+	data_t[1] = (nibble & 0xF0) | 0x08;
+	HAL_I2C_Master_Transmit(lcd_i2c, LCD_ADDR, data_t, 2, 100);
 }
 
 static void LCD_SendCommand(uint8_t cmd) {
-    uint8_t data_u, data_l;
-    uint8_t data_t[4];
-    data_u = (cmd & 0xf0);
-    data_l = ((cmd << 4) & 0xf0);
-    data_t[0] = data_u | 0x0C;
-    data_t[1] = data_u | 0x08;
-    data_t[2] = data_l | 0x0C;
-    data_t[3] = data_l | 0x08;
-    HAL_I2C_Master_Transmit(lcd_i2c, LCD_ADDR, data_t, 4, 100);
+	uint8_t data_u, data_l, data_t[4];
+	data_u = (cmd & 0xf0);
+	data_l = ((cmd << 4) & 0xf0);
+	data_t[0] = data_u | 0x0C;
+	data_t[1] = data_u | 0x08;
+	data_t[2] = data_l | 0x0C;
+	data_t[3] = data_l | 0x08;
+	HAL_I2C_Master_Transmit(lcd_i2c, LCD_ADDR, data_t, 4, 100);
 }
 
 static void LCD_SendData(uint8_t data) {
-    uint8_t data_u, data_l;
-    uint8_t data_t[4];
-    data_u = (data & 0xf0);
-    data_l = ((data << 4) & 0xf0);
-    data_t[0] = data_u | 0x0D;
-    data_t[1] = data_u | 0x09;
-    data_t[2] = data_l | 0x0D;
-    data_t[3] = data_l | 0x09;
-    HAL_I2C_Master_Transmit(lcd_i2c, LCD_ADDR, data_t, 4, 100);
+	uint8_t data_u, data_l, data_t[4];
+	data_u = (data & 0xf0);
+	data_l = ((data << 4) & 0xf0);
+	data_t[0] = data_u | 0x0D;
+	data_t[1] = data_u | 0x09;
+	data_t[2] = data_l | 0x0D;
+	data_t[3] = data_l | 0x09;
+	HAL_I2C_Master_Transmit(lcd_i2c, LCD_ADDR, data_t, 4, 100);
 }
 
 void LCD_Clear(void) {
-    LCD_SendCommand(0x01);
-    HAL_Delay(2);
+	LCD_SendCommand(0x01);
+	HAL_Delay(2);
 }
 
 void LCD_Print(uint8_t row, uint8_t col, char *str) {
-    uint8_t pos = (row == 0) ? (0x80 | col) : (0xC0 | col);
-    LCD_SendCommand(pos);
-    while (*str) {
-        LCD_SendData(*str++);
-    }
+	uint8_t pos = (row == 0) ? (0x80 | col) : (0xC0 | col);
+	LCD_SendCommand(pos);
+	while (*str) {
+		LCD_SendData(*str++);
+	}
+}
+
+/* =========================================================================
+ * FUNCIONES AUXILIARES DE NAVEGACIÓN
+ * ========================================================================= */
+
+/**
+ * @brief  Procesa el movimiento del encoder para navegar entre un rango definido.
+ * @param  max_opciones: Cantidad total de opciones en el menú actual.
+ */
+static void Procesar_Navegacion_Encoder(uint8_t max_opciones) {
+	int32_t delta = encoder_contador - ultimo_encoder;
+	if (delta > 0) {
+		menu_index++;
+		if (menu_index >= max_opciones)
+			menu_index = 0; // Rollover hacia arriba
+		ultimo_encoder = encoder_contador;
+		LCD_Clear(); // Limpiamos pantalla al cambiar para no dejar rastros
+	} else if (delta < 0) {
+		if (menu_index == 0)
+			menu_index = max_opciones - 1; // Rollover hacia abajo
+		else
+			menu_index--;
+		ultimo_encoder = encoder_contador;
+		LCD_Clear();
+	}
+}
+
+/**
+ * @brief Renderiza un menú desplazable de 16x2.
+ * @param titulo_menu: Arreglo de strings con los nombres.
+ * @param total: Número total de opciones.
+ * @param index: Índice actual seleccionado.
+ */
+static void LCD_MostrarMenu(const char *opciones[], uint8_t total,
+		uint8_t index) {
+	char buffer[17];
+
+	// Fila 0: Muestra la opción seleccionada con una flecha
+	sprintf(buffer, "> %-14s", opciones[index]);
+	LCD_Print(0, 0, buffer);
+
+	// Fila 1: Muestra la siguiente opción como contexto (si existe)
+	uint8_t next_index = (index + 1) % total;
+	sprintf(buffer, "  %-14s", opciones[next_index]);
+	LCD_Print(1, 0, buffer);
+}
+
+/**
+ * @brief Lógica para leer el botón Select (PB14) optimizada para filtros RC físicos.
+ * @retval 1 si el botón fue presionado de forma válida, 0 en caso contrario.
+ */
+static uint8_t Leer_Boton_Select(void) {
+	static uint8_t boton_presionado_anterior = 0;
+
+	// FILTRO DE SEGURIDAD: Ignorar transitorios lógicos en el microsegundo de arranque
+	if (HAL_GetTick() < 500) {
+		return 0;
+	}
+
+	// Leemos el estado eléctrico actual en el pin PB14
+	uint8_t estado_pin = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14);
+
+	// Si el pin está en RESET (0V) significa que el botón está activado físicamente
+	if (estado_pin == GPIO_PIN_RESET) {
+		// Candado lógico: Solo dispara el clic la primera vez que detecta el cambio
+		if (!boton_presionado_anterior) {
+			boton_presionado_anterior = 1; // Bloqueamos para que no repita en el lazo
+			return 1; // Retorna ÉXITO inmediatemente
+		}
+	} else {
+		// Cuando la rampa del capacitor sube y supera el umbral de 3.3V (botón suelto)
+		boton_presionado_anterior = 0; // Liberamos el candado para el próximo clic
+	}
+
+	return 0; // Sin clics nuevos
 }
 
 /* =========================================================================
  * CONFIGURACIÓN DE HARDWARE: ENCODER Y BOTONES
  * ========================================================================= */
 void Interfaz_Controles_Init(void) {
-    __HAL_RCC_TIM4_CLK_ENABLE();
-    __HAL_RCC_GPIOB_CLK_ENABLE();
+	__HAL_RCC_TIM4_CLK_ENABLE();
+	__HAL_RCC_GPIOB_CLK_ENABLE();
 
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+	GPIO_InitTypeDef GPIO_InitStruct = { 0 };
 
-    /* 1. ENCODER ROTATIVO (TIM4 - Pines PB6 y PB7) */
-    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+	/* 1. ENCODER ROTATIVO (TIM4 - Pines PB6 y PB7) */
+	GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+	GPIO_InitStruct.Pull = GPIO_PULLUP;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+	GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;
+	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    TIM_Encoder_InitTypeDef sConfig = {0};
-    TIM_MasterConfigTypeDef sMasterConfig = {0};
+	TIM_Encoder_InitTypeDef sConfig = { 0 };
+	TIM_MasterConfigTypeDef sMasterConfig = { 0 };
 
-    htim4.Instance = TIM4;
-    htim4.Init.Prescaler = 0;
-    htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim4.Init.Period = 65535;
-    htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+	htim4.Instance = TIM4;
+	htim4.Init.Prescaler = 0;
+	htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+	htim4.Init.Period = 65535;
+	htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+	htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
 
-    // Configuración TI12: Cuenta en todos los flancos para máxima precisión
-    sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
-    sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
-    sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
-    sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-    sConfig.IC1Filter = 15; // Filtro de rebotes de hardware elevado
+	sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
+	sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
+	sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+	sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+	sConfig.IC1Filter = 15;
 
-    sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
-    sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
-    sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-    sConfig.IC2Filter = 15;
+	sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
+	sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+	sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+	sConfig.IC2Filter = 15;
 
-    HAL_TIM_Encoder_Init(&htim4, &sConfig);
+	HAL_TIM_Encoder_Init(&htim4, &sConfig);
 
-    sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-    sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-    HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig);
+	sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+	sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+	HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig);
 
-    HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
+	HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
 
-    /* 2. BOTONES POR INTERRUPCIÓN (PB12, PB13, PB14) */
-    // PB12 = SPEED | PB13 = SYNC | PB14 = SELECT (Encoder Btn)
-    GPIO_InitStruct.Pin = GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14;
-    GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;  // Interrupción al soltar a GND
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+	/* 2. BOTONES (PB12 y PB13 mantienen IT, PB14 pasa a entrada pura para el filtro RC) */
+	GPIO_InitStruct.Pin = GPIO_PIN_12 | GPIO_PIN_13;
+	GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+	GPIO_InitStruct.Pull = GPIO_PULLUP;
+	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
-    HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+	// Configuración dedicada para el botón de selección con filtro RC
+	GPIO_InitStruct.Pin = GPIO_PIN_14;
+	GPIO_InitStruct.Mode = GPIO_MODE_INPUT; // Entrada digital normal, sin interrupción
+	GPIO_InitStruct.Pull = GPIO_PULLUP;    // Mantiene el pull-up activo
+	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+	HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
+	HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
 
 void Interfaz_LeerEncoder(void) {
-    // Se divide por 4 debido al modo TI12 que cuenta los 4 estados de la cuadratura
-    encoder_contador = (int32_t)(__HAL_TIM_GET_COUNTER(&htim4)) / 4;
+	// Se divide por 4 debido al modo TI12 que cuenta los 4 estados de la cuadratura
+	encoder_contador = (int32_t) (__HAL_TIM_GET_COUNTER(&htim4)) / 4;
 }
 
 /* =========================================================================
- * LÓGICA PRINCIPAL (FSM E INICIALIZACIÓN)
+ * LÓGICA PRINCIPAL DE INICIALIZACIÓN DE LA INTERFAZ
  * ========================================================================= */
 void Interfaz_InitLogica(void) {
-    // 1. Inicializar hardware del usuario (Encoder y Botones)
-    Interfaz_Controles_Init();
+	// 1. Inicializar hardware del usuario (Encoder y Botones)
+	Interfaz_Controles_Init();
 
-    // 2. Inicializar Pantalla LCD
-    lcd_i2c = &hi2c1;
+	// 2. Inicializar Pantalla LCD
+	lcd_i2c = &hi2c1;
 
-    // Espera crítica para que el voltaje de 5V de la pantalla se estabilice
-    HAL_Delay(100);
+	// Espera crítica para que el voltaje de 5V de la pantalla se estabilice
+	HAL_Delay(100);
 
-    // Secuencia oficial de hardware (HD44780) para forzar el paso de 8-bit a 4-bit
-    LCD_SendNibble(0x30); HAL_Delay(5);
-    LCD_SendNibble(0x30); HAL_Delay(1);
-    LCD_SendNibble(0x30); HAL_Delay(1);
-    LCD_SendNibble(0x20); HAL_Delay(1); // ¡A partir de aquí ya estamos en 4-bit!
+	// Secuencia oficial de hardware (HD44780) para forzar el paso de 8-bit a 4-bit
+	LCD_SendNibble(0x30);
+	HAL_Delay(5);
+	LCD_SendNibble(0x30);
+	HAL_Delay(1);
+	LCD_SendNibble(0x30);
+	HAL_Delay(1);
+	LCD_SendNibble(0x20);
+	HAL_Delay(1); // ¡A partir de aquí ya estamos en 4-bit!
 
-    // Ahora sí podemos usar la función normal de comandos
-    LCD_SendCommand(0x28); HAL_Delay(2); // Función Set: 4-bit, 2 líneas, 5x8
-    LCD_SendCommand(0x08); HAL_Delay(2); // Display OFF
-    LCD_SendCommand(0x01); HAL_Delay(5); // Clear Display
-    LCD_SendCommand(0x06); HAL_Delay(2); // Entry Mode Set
-    LCD_SendCommand(0x0C); HAL_Delay(2); // Display ON, Cursor OFF
+	// Ahora sí podemos usar la función normal de comandos
+	LCD_SendCommand(0x28);
+	HAL_Delay(2); // Función Set: 4-bit, 2 líneas, 5x8
+	LCD_SendCommand(0x08);
+	HAL_Delay(2); // Display OFF
+	LCD_SendCommand(0x01);
+	HAL_Delay(5); // Clear Display
+	LCD_SendCommand(0x06);
+	HAL_Delay(2); // Entry Mode Set
+	LCD_SendCommand(0x0C);
+	HAL_Delay(2); // Display ON, Cursor OFF
 }
 
+/* =========================================================================
+ * MÁQUINA DE ESTADOS PRINCIPAL (FSM)
+ * ========================================================================= */
 void Interfaz_UpdateFSM(void) {
-    char linea1[20];
-    char linea2[20];
+	// 1. Lectura obligatoria de hardware
+	Interfaz_LeerEncoder();
 
-    // Actualizamos el valor del encoder en cada ciclo
-    Interfaz_LeerEncoder();
+	// --- NUEVO: SISTEMA DE LATCHING (CANDADO DE MEMORIA) ---
+	static uint8_t flag_clic_pendiente = 0;
 
-    static uint32_t ultimo_refresco = 0;
-    if (HAL_GetTick() - ultimo_refresco < 250) {
-        return;
-    }
-    ultimo_refresco = HAL_GetTick();
+	// Leemos el botón. Si detecta un clic válido, lo guardamos permanentemente
+	// en la variable estática hasta que la FSM lo consuma.
+	if (Leer_Boton_Select()) {
+		flag_clic_pendiente = 1;
+	}
 
-    switch (currentState) {
-        case STATE_BOOTING:
-            LCD_Print(0, 0, "ASTRO-MOUNT v1.0");
-            if (gps_actual.latitud != 0.0f) {
-                currentState = STATE_MANUAL;
-                LCD_Clear();
-            } else {
-                LCD_Print(1, 0, "Buscando GPS... ");
-            }
-            break;
+	char buffer1[20];
+	char buffer2[20];
 
-        case STATE_MANUAL:
-            sprintf(linea1, "Z:%5.1f  Y:%5.1f", imu_actual.orientacion_z, imu_actual.inclinacion_y);
-            LCD_Print(0, 0, linea1);
+	// 2. Control de Tasa de Refresco (200ms) para no saturar I2C
+	static uint32_t ultimo_refresco = 0;
+	if (HAL_GetTick() - ultimo_refresco < 200) {
+		return; // Salimos de la función, PERO el clic quedó a salvo en flag_clic_pendiente
+	}
+	ultimo_refresco = HAL_GetTick();
 
-            {
-                char dir_lat = (gps_actual.latitud >= 0) ? 'N' : 'S';
-                char dir_lon = (gps_actual.longitud >= 0) ? 'E' : 'W';
+	// 3. Descargamos el clic pendiente en la variable local para este ciclo
+	// y limpiamos la bandera para permitir futuros clics.
+	uint8_t btn_presionado = flag_clic_pendiente;
+	flag_clic_pendiente = 0;
 
-                float lat_abs = (gps_actual.latitud < 0) ? -gps_actual.latitud : gps_actual.latitud;
-                float lon_abs = (gps_actual.longitud < 0) ? -gps_actual.longitud : gps_actual.longitud;
+	// 4. Evaluación de Estados
+	switch (currentState) {
 
-                sprintf(linea2, "M:%4.1f%c  %5.1f%c", lat_abs, dir_lat, lon_abs, dir_lon);
-                LCD_Print(1, 0, linea2);
-            }
-            break;
+	/* --------------------------------------------------
+	 * ARRANQUE Y VERIFICACIÓN
+	 * -------------------------------------------------- */
+	case STATE_BOOTING:
+		LCD_Print(0, 0, "ASTRO-MOUNT v1.0");
 
-        case STATE_TRACKING:
-            LCD_Print(0, 0, "MODO SEGUIMIENTO");
-            LCD_Print(1, 0, "Objetivo fijado.");
-            break;
+		// Revisamos dos condiciones: GPS válido y Homing de motores terminado
+		if (gps_actual.latitud != 0.0f && flag_homing_ok) {
+			currentState = STATE_BOOT_SUCCESS;
+			boot_timer = HAL_GetTick(); // Guardamos el tiempo de inicio
+			LCD_Clear();
+		} else {
+			LCD_Print(1, 0, "Wait GPS & Home.");
+		}
+		break;
 
-        case STATE_ERROR:
-            LCD_Print(0, 0, "ERROR DE SISTEMA");
-            LCD_Print(1, 0, "Revise sensores ");
-            break;
-    }
+	case STATE_BOOT_SUCCESS:
+		// Mostramos señal exitosa por 3 segundos
+		sprintf(buffer1, "GPS OK! SATS: 0 "); // TODO: Poner variable de satélites real
+		sprintf(buffer2, "Hora: %02d:%02d:%02d",
+				(int) gps_actual.ut_horas / 10000,
+				((int) gps_actual.ut_horas % 10000) / 100,
+				(int) gps_actual.ut_horas % 100);
+
+		LCD_Print(0, 0, buffer1);
+		LCD_Print(1, 0, buffer2);
+
+		if (HAL_GetTick() - boot_timer > 3000) {
+			currentState = STATE_MAIN_MENU;
+			menu_index = 0;
+			LCD_Clear();
+		}
+		break;
+
+		/* --------------------------------------------------
+		 * MENÚ PRINCIPAL
+		 * -------------------------------------------------- */
+	case STATE_MAIN_MENU: {
+		const char *opciones_main[] = { "Modo Manual", "Modo Offline",
+				"Modo Online", "Informacion" };
+		Procesar_Navegacion_Encoder(4);
+		LCD_MostrarMenu(opciones_main, 4, menu_index);
+
+		if (btn_presionado) {
+			LCD_Clear();
+			if (menu_index == 0)
+				currentState = STATE_MANUAL;
+			if (menu_index == 1) {
+				currentState = STATE_OFFLINE_CATALOGO;
+				menu_index = 0;
+			}
+			if (menu_index == 2)
+				currentState = STATE_ONLINE;
+			if (menu_index == 3) {
+				currentState = STATE_INFO;
+				menu_index = 0;
+			}
+		}
+		break;
+	}
+
+		/* --------------------------------------------------
+		 * MODO 1: MANUAL (Joystick Activo)
+		 * -------------------------------------------------- */
+	case STATE_MANUAL:
+		// Acá motores.c lee el ADC y mueve la montura. Solo mostramos datos.
+		sprintf(buffer1, "Z:%5.1f Y:%5.1f ", imu_actual.orientacion_z,
+				imu_actual.inclinacion_y);
+		LCD_Print(0, 0, buffer1);
+		LCD_Print(1, 0, "  [SELECT = OUT] ");
+
+		if (btn_presionado) {
+			currentState = STATE_MAIN_MENU;
+			menu_index = 0; // Regresar a la opción manual del menú
+			LCD_Clear();
+		}
+		break;
+
+		/* --------------------------------------------------
+		 * MODO 2: OFFLINE (Base de Datos)
+		 * -------------------------------------------------- */
+	case STATE_OFFLINE_CATALOGO: {
+		const char *opciones_cat[] = { "Messier", "Estrellas", "< Volver" };
+		Procesar_Navegacion_Encoder(3);
+		LCD_MostrarMenu(opciones_cat, 3, menu_index);
+
+		if (btn_presionado) {
+			LCD_Clear();
+			if (menu_index == 2) {
+				currentState = STATE_MAIN_MENU;
+				menu_index = 1;
+			} else {
+				catalogo_seleccionado = menu_index; // 0 o 1
+				total_objetos_actual = (catalogo_seleccionado == 0) ? 20 : 10;
+				currentState = STATE_OFFLINE_OBJETO;
+				menu_index = 0;
+			}
+		}
+		break;
+	}
+
+	case STATE_OFFLINE_OBJETO: {
+		// El número de opciones es el total de la base de datos + 1 (Botón Volver)
+		uint8_t opciones_totales = total_objetos_actual + 1;
+		Procesar_Navegacion_Encoder(opciones_totales);
+
+		// Renderizado dinámico leyendo directamente de astronomia.c (ROM)
+		char buf_fila0[17];
+		char buf_fila1[17];
+
+		// Fila 0
+		if (menu_index < total_objetos_actual) {
+			sprintf(buf_fila0, "> %-14s",
+					Astronomia_ObtenerObjeto(catalogo_seleccionado, menu_index)->nombre);
+		} else {
+			sprintf(buf_fila0, "> %-14s", "< Volver");
+		}
+
+		// Fila 1
+		uint8_t next_idx = (menu_index + 1) % opciones_totales;
+		if (next_idx < total_objetos_actual) {
+			sprintf(buf_fila1, "  %-14s",
+					Astronomia_ObtenerObjeto(catalogo_seleccionado, next_idx)->nombre);
+		} else {
+			sprintf(buf_fila1, "  %-14s", "< Volver");
+		}
+
+		LCD_Print(0, 0, buf_fila0);
+		LCD_Print(1, 0, buf_fila1);
+
+		if (btn_presionado) {
+			LCD_Clear();
+			if (menu_index == total_objetos_actual) { // < Volver
+				currentState = STATE_OFFLINE_CATALOGO;
+				menu_index = catalogo_seleccionado;
+			} else {
+				objeto_seleccionado = menu_index; // Guardamos en RAM el objeto elegido
+				currentState = STATE_OFFLINE_ACCION;
+				menu_index = 0;
+			}
+		}
+		break;
+	}
+
+	case STATE_OFFLINE_ACCION: {
+		const char *opciones_acc[] = { "Apuntar", "Iniciar Track", "< Volver" };
+		Procesar_Navegacion_Encoder(3);
+		LCD_MostrarMenu(opciones_acc, 3, menu_index);
+
+		if (btn_presionado) {
+			LCD_Clear();
+			if (menu_index == 2) {
+				currentState = STATE_OFFLINE_OBJETO;
+				menu_index = objeto_seleccionado;
+			} else {
+				const ObjetoCeleste_t *obj = Astronomia_ObtenerObjeto(
+						catalogo_seleccionado, objeto_seleccionado);
+				target_actual.ra = obj->ra;
+				target_actual.dec = obj->dec;
+
+				Astronomia_CalcularAltAz();
+
+				if (menu_index == 0) { // Opcion: Apuntar
+					// Mostramos el objetivo en pantalla durante un segundo
+					LCD_Print(0, 0, "Calculando...   ");
+					sprintf(buffer2, "Z:%.0f Y:%.0f     ", target_actual.azimut,
+							target_actual.altitud);
+					LCD_Print(1, 0, buffer2);
+					HAL_Delay(1000);
+					LCD_Clear();
+
+					// ¡Disparamos los motores asíncronamente!
+					Motores_Apuntar(target_actual.azimut,
+							target_actual.altitud);
+
+					// Transición al estado de viaje
+					currentState = STATE_MOVIENDO;
+				} else if (menu_index == 1) {
+					currentState = STATE_TRACKING;
+				}
+			}
+		}
+		break;
+	}
+
+		/* --------------------------------------------------
+		 * ESTADO DE VIAJE AUTOMÁTICO (GoTo No Bloqueante)
+		 * -------------------------------------------------- */
+	case STATE_MOVIENDO:
+		LCD_Print(0, 0, "Moviendo Tubo...");
+		LCD_Print(1, 0, "[SELECT = STOP]");
+
+		// 1. Condición de Parada de Emergencia (Usuario cancela)
+		if (btn_presionado) {
+			Motores_DetenerGoTo();
+			LCD_Clear();
+			LCD_Print(0, 0, "Viaje Cancelado ");
+			HAL_Delay(1500);
+			currentState = STATE_OFFLINE_CATALOGO;
+			menu_index = 0;
+			LCD_Clear();
+		}
+		// 2. Condición de Éxito (Las banderas de interrupción avisan que llegaron a 0)
+		else if (flag_goto_terminado_az && flag_goto_terminado_alt) {
+			LCD_Clear();
+			LCD_Print(0, 0, "Objetivo en Mira");
+			HAL_Delay(1500);
+			currentState = STATE_OFFLINE_CATALOGO;
+			menu_index = 0;
+			LCD_Clear();
+		}
+		break;
+
+	case STATE_TRACKING:
+		LCD_Print(0, 0, ">> TRACKING <<  ");
+		sprintf(buffer2, "Z:%4.0f Y:%4.0f", imu_actual.orientacion_z,
+				imu_actual.inclinacion_y);
+		LCD_Print(1, 0, buffer2);
+
+		if (btn_presionado) {
+			// TODO: Enviar comando de parada a los motores
+			currentState = STATE_OFFLINE_CATALOGO;
+			menu_index = 0;
+			LCD_Clear();
+		}
+		break;
+
+		/* --------------------------------------------------
+		 * MODO 3: ONLINE (Serial)
+		 * -------------------------------------------------- */
+	case STATE_ONLINE:
+		LCD_Print(0, 0, "LINK: STELLARIUM");
+		LCD_Print(1, 0, "Escuchando UART.");
+
+		if (btn_presionado) {
+			currentState = STATE_MAIN_MENU;
+			menu_index = 2;
+			LCD_Clear();
+		}
+		break;
+
+		/* --------------------------------------------------
+		 * INFO EXTRA (Coordenadas y Euler)
+		 * -------------------------------------------------- */
+	case STATE_INFO: {
+		// Como la pantalla es pequeña, usamos el encoder para scrollear 2 páginas
+		Procesar_Navegacion_Encoder(2);
+
+		if (menu_index == 0) { // Página 1: Lat/Lon y Hora
+			sprintf(buffer1, "Lat:%5.2f %c  ",
+					(gps_actual.latitud >= 0) ?
+							gps_actual.latitud : -gps_actual.latitud,
+					(gps_actual.latitud >= 0) ? 'N' : 'S');
+			sprintf(buffer2, "Lon:%5.2f %c  ",
+					(gps_actual.longitud >= 0) ?
+							gps_actual.longitud : -gps_actual.longitud,
+					(gps_actual.longitud >= 0) ? 'E' : 'W');
+			LCD_Print(0, 0, buffer1);
+			LCD_Print(1, 0, buffer2);
+		} else { // Página 2: Ángulos Euler completos
+			sprintf(buffer1, "Z:%5.1f Y:%5.1f", imu_actual.orientacion_z,
+					imu_actual.inclinacion_y);
+			sprintf(buffer2, "R:%5.1f (Roll)", imu_actual.roll_x);
+			LCD_Print(0, 0, buffer1);
+			LCD_Print(1, 0, buffer2);
+		}
+
+		if (btn_presionado) {
+			currentState = STATE_MAIN_MENU;
+			menu_index = 3;
+			LCD_Clear();
+		}
+		break;
+	}
+
+		/* --------------------------------------------------
+		 * ESTADO DE ERROR
+		 * -------------------------------------------------- */
+	case STATE_ERROR:
+		LCD_Print(0, 0, "ERROR CRITICO   ");
+		LCD_Print(1, 0, "Revise sensores ");
+		break;
+	}
 }
-
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-    if (GPIO_Pin == GPIO_PIN_12) {
-        flag_btn_speed = 1;
-    }
-    else if (GPIO_Pin == GPIO_PIN_13) {
-        flag_btn_sync = 1;
-    }
-    else if (GPIO_Pin == GPIO_PIN_14) {
-        // Se oprimió el botón central del Encoder Rotativo
-        flag_btn_select = 1;
-    }
+	if (GPIO_Pin == GPIO_PIN_12)
+		flag_btn_speed = 1;
+	else if (GPIO_Pin == GPIO_PIN_13)
+		flag_btn_sync = 1;
+	// else if (GPIO_Pin == GPIO_PIN_14) flag_btn_select = 1;
 }

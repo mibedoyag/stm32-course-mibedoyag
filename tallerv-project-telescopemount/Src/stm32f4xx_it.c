@@ -25,6 +25,9 @@ extern TIM_HandleTypeDef htim4;
 /* Handle del TIM10 para el blinky en main.c */
 extern TIM_HandleTypeDef htim10;
 
+extern TIM_HandleTypeDef htim2; // Manejador del Timer 2 (Eje Azimut)
+extern TIM_HandleTypeDef htim3; // Manejador del Timer 3 (Eje Altitud)
+
 /* ====================================================================
  * INTERRUPCIONES DEL SISTEMA BASE
  * ==================================================================== */
@@ -94,4 +97,30 @@ void TIM1_UP_TIM10_IRQHandler(void)
 {
   // Le pasamos el control a la HAL para que limpie banderas y llame al Callback
   HAL_TIM_IRQHandler(&htim10);
+}
+
+/* =========================================================================
+ * RUTINAS DE SERVICIO DE INTERRUPCIÓN (ISR) PARA LOS MOTORES
+ * ========================================================================= */
+
+/**
+ * @brief Función ISR para la interrupción global de TIM2.
+ * @note  Se ejecuta en cada flanco del PWM del motor de Azimut.
+ */
+void TIM2_IRQHandler(void)
+{
+    // La función de la capa HAL se encarga de limpiar las banderas de hardware
+    // y redirige el flujo automáticamente hacia nuestro HAL_TIM_PWM_PulseFinishedCallback()
+    HAL_TIM_IRQHandler(&htim2);
+}
+
+/**
+ * @brief Función ISR para la interrupción global de TIM3.
+ * @note  Se ejecuta en cada flanco del PWM del motor de Altitud.
+ */
+void TIM3_IRQHandler(void)
+{
+    // La función de la capa HAL se encarga de limpiar las banderas de hardware
+    // y redirige el flujo automáticamente hacia nuestro HAL_TIM_PWM_PulseFinishedCallback()
+    HAL_TIM_IRQHandler(&htim3);
 }
