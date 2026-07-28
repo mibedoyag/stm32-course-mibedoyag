@@ -35,7 +35,10 @@ typedef struct {
  * ==================================================================== */
 extern I2C_HandleTypeDef hi2c1;   // I2C1 -> Pantalla LCD
 extern UART_HandleTypeDef huart1; // UART1 -> GPS (DMA)
-extern UART_HandleTypeDef huart6; // UART6 -> IMU BNO055 (Polling con Timeout)
+extern UART_HandleTypeDef huart6; // UART6 -> IMU BNO055 (Polling con Timeout
+
+/* Banderas de estado del GPS */
+extern volatile uint8_t gps_coordenadas_fijadas;
 
 extern DatosIMU_t imu_actual;
 extern DatosGPS_t gps_actual;

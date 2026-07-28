@@ -178,60 +178,132 @@ void Sensores_InitLogica(void) {
 /* =========================================================================
  * 4. PROCESAMIENTO DE DATOS EN LAZO
  * ========================================================================= */
-static float ConvertirCoordenada(float nmea_raw, char direccion) {
-    int grados = (int)(nmea_raw / 100);
-    float minutos = nmea_raw - (grados * 100);
-    float decimal = grados + (minutos / 60.0f);
-    if (direccion == 'S' || direccion == 'W') decimal *= -1.0f;
-    return decimal;
+/**
+ * @brief Convierte grados/minutos NMEA a grados decimales usando doble precisión.
+ * @note Se pasa el string directamente para aprovechar atof() que devuelve un double.
+ */
+static float ConvertirCoordenada(const char* nmea_str, char direccion) {
+    if (nmea_str == NULL || strlen(nmea_str) == 0) return 0.0f;
+
+    double nmea_raw = atof(nmea_str); // Mantiene todos los decimales
+    int grados = (int)(nmea_raw / 100.0);
+    double minutos = nmea_raw - (grados * 100.0);
+    double decimal = (double)grados + (minutos / 60.0);
+
+    if (direccion == 'S' || direccion == 'W') {
+        decimal *= -1.0;
+    }
+
+    return (float)decimal; // Retornamos a float para la FPU de astronomia.c
 }
+/**
+ * @brief Extrae datos de la trama GPRMC de forma robusta, soportando campos vacíos.
+ * Permite capturar la hora del RTC interno del GPS sin necesidad de satélites.
+ */
+// Variables estáticas para el candado inteligente de posición propuesto
+volatile uint8_t gps_coordenadas_fijadas = 0;
+static uint8_t gps_lecturas_validas = 0;
 
 static void Parser_NMEA_GPRMC(char *trama_limpia) {
-    char temp_trama[GPS_BUFFER_SIZE];
-    strncpy(temp_trama, trama_limpia, GPS_BUFFER_SIZE);
-    char *token = strtok(temp_trama, ",");
-    token = strtok(NULL, ",");
-    if (token) gps_actual.ut_horas = atof(token) / 10000.0f;
-    token = strtok(NULL, ",");
-    if (token && token[0] == 'A') {
-        token = strtok(NULL, ",");
-        float raw_lat = token ? atof(token) : 0.0f;
-        token = strtok(NULL, ",");
-        char dir_lat = token ? token[0] : 'N';
-        gps_actual.latitud = ConvertirCoordenada(raw_lat, dir_lat);
-        token = strtok(NULL, ",");
-        float raw_lon = token ? atof(token) : 0.0f;
-        token = strtok(NULL, ",");
-        char dir_lon = token ? token[0] : 'W';
-        gps_actual.longitud = ConvertirCoordenada(raw_lon, dir_lon);
-        token = strtok(NULL, ",");
-        token = strtok(NULL, ",");
-        token = strtok(NULL, ",");
-        if (token) {
-            uint32_t fecha = atoi(token);
-            gps_actual.dia = fecha / 10000;
-            gps_actual.mes = (fecha % 10000) / 100;
-            gps_actual.anio = (fecha % 100) + 2000;
-        }
-    }
-}
+    char *campos[13] = {NULL};
+    uint8_t num_campos = 0;
 
-void Sensores_ProcesarDatos(void) {
-    // A. PROCESAMIENTO GPS
-    char *ptr_inicio = strstr(gps_dma_buffer, "$GPRMC");
-    if (ptr_inicio == NULL) { ptr_inicio = strstr(gps_dma_buffer, "$GNRMC"); }
-    if (ptr_inicio != NULL) {
-        char *ptr_fin = strchr(ptr_inicio, '\n');
-        if (ptr_fin != NULL) {
-            size_t longitud_trama = ptr_fin - ptr_inicio;
-            if (longitud_trama < GPS_BUFFER_SIZE && longitud_trama > 10) {
-                memcpy(gps_rx_buffer, ptr_inicio, longitud_trama);
-                gps_rx_buffer[longitud_trama] = '\0';
-                ptr_inicio[0] = '0';
-                Parser_NMEA_GPRMC(gps_rx_buffer);
+    // 1. Fragmentación segura de la trama NMEA
+    campos[num_campos++] = trama_limpia;
+    for (int i = 0; trama_limpia[i] != '\0'; i++) {
+        if (trama_limpia[i] == ',' || trama_limpia[i] == '*') {
+            trama_limpia[i] = '\0';
+            if (num_campos < 13) {
+                campos[num_campos++] = &trama_limpia[i + 1];
             }
         }
     }
+
+    if (num_campos >= 10) {
+
+		// 2. HORA Y FECHA (Se actualizan continuamente)
+		if (strlen(campos[1]) >= 6) {
+			double raw_time = atof(campos[1]);
+			int hh = (int) (raw_time / 10000.0);
+			int mm = (int) ((raw_time - (hh * 10000.0)) / 100.0);
+			double ss = raw_time - (hh * 10000.0) - (mm * 100.0);
+
+			// Guardamos en horas decimales perfectas para astronomia.c
+			gps_actual.ut_horas = (float) hh + ((float) mm / 60.0f)
+					+ ((float) ss / 3600.0f);
+		}
+
+		if (strlen(campos[9]) == 6) {
+			uint32_t fecha = atoi(campos[9]);
+			gps_actual.dia = fecha / 10000;
+			gps_actual.mes = (fecha % 10000) / 100;
+			gps_actual.anio = (fecha % 100) + 2000;
+		}
+
+        // 3. LATITUD Y LONGITUD (Bloqueo Estático para Telescopio)
+        if (campos[2][0] == 'A') { // Si hay Fix válido de los satélites
+
+            if (gps_coordenadas_fijadas == 0) {
+                gps_lecturas_validas++; // Filtro de confianza
+
+                // Esperamos 5 tramas seguidas para asegurar que la señal es estable
+                if (gps_lecturas_validas > 5) {
+                    if (strlen(campos[3]) > 0) {
+                        gps_actual.latitud = ConvertirCoordenada(campos[3], campos[4][0]);
+                    }
+                    if (strlen(campos[5]) > 0) {
+                        gps_actual.longitud = ConvertirCoordenada(campos[5], campos[6][0]);
+                    }
+                    // ¡Candado activado! No volveremos a sobreescribir la posición.
+                    gps_coordenadas_fijadas = 1;
+                }
+            }
+        } else {
+            // Si perdemos señal antes de fijarla, reiniciamos el contador de seguridad
+            gps_lecturas_validas = 0;
+        }
+    }
+}
+
+
+/* =========================================================================
+ * 4. PROCESAMIENTO DE DATOS EN LAZO
+ * ========================================================================= */
+
+// Variables estáticas para la persecución del DMA (Ring Buffer)
+static uint32_t rx_tail = 0;
+static char linea_actual[120];
+static uint8_t indice_linea = 0;
+void Sensores_ProcesarDatos(void) {
+	// A. PROCESAMIENTO GPS (Extracción segura Byte a Byte)
+
+	// Obtenemos la posición actual exacta donde el DMA está escribiendo (Head)
+	uint32_t rx_head = GPS_BUFFER_SIZE - __HAL_DMA_GET_COUNTER(&hdma_usart1_rx);
+
+	// Mientras nuestro puntero de lectura no haya alcanzado al DMA...
+	while (rx_tail != rx_head) {
+		char c = gps_dma_buffer[rx_tail];
+		rx_tail = (rx_tail + 1) % GPS_BUFFER_SIZE; // Avanzamos de forma circular
+
+		if (c == '$') {
+			indice_linea = 0; // Si vemos un '$', vaciamos el buffer temporal
+		}
+
+		// Guardamos el caracter si hay espacio
+		if (indice_linea < sizeof(linea_actual) - 1) {
+			linea_actual[indice_linea++] = c;
+		}
+
+		if (c == '\n') { // ¡Trama 100% completada y segura!
+			linea_actual[indice_linea] = '\0'; // Cerramos el string manual
+
+			// Evaluamos solo si es la trama que nos interesa
+			if (strncmp(linea_actual, "$GPRMC", 6) == 0
+					|| strncmp(linea_actual, "$GNRMC", 6) == 0) {
+				Parser_NMEA_GPRMC(linea_actual);
+			}
+		}
+	}
 
     // B. PROCESAMIENTO IMU (UART sin bloqueos)
     // Trama lectura: Header(0xAA) | Read(0x01) | Reg(0x1A - Euler Z) | Len(0x06 bytes)

@@ -120,8 +120,8 @@ static void Motores_ADC_Init(void) {
 
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    // Configurar PA1 (IN1, Eje X) y PA2 (IN2, Eje Y) en modo analógico
-    GPIO_InitStruct.Pin = GPIO_PIN_1 | GPIO_PIN_2;
+    // Configurar PA1 (IN1, Eje X) y PA7 (IN2, Eje Y) en modo analógico
+    GPIO_InitStruct.Pin = GPIO_PIN_1 | GPIO_PIN_7;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
@@ -165,8 +165,8 @@ static void Motores_ADC_Init(void) {
     sConfig.SamplingTime = ADC_SAMPLETIME_84CYCLES;
     HAL_ADC_ConfigChannel(&hadc1, &sConfig);
 
-    // Rango 2: Canal 2 (PA2 - Eje Y)
-    sConfig.Channel = ADC_CHANNEL_2;
+    // Rango 2: Canal 7 (PA2 - Eje Y)
+    sConfig.Channel = ADC_CHANNEL_7;
     sConfig.Rank = 2;
     HAL_ADC_ConfigChannel(&hadc1, &sConfig);
 

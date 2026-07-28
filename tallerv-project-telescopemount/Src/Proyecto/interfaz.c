@@ -533,10 +533,10 @@ void Interfaz_UpdateFSM(void) {
 		 * INFO EXTRA (Coordenadas y Euler)
 		 * -------------------------------------------------- */
 	case STATE_INFO: {
-		// Como la pantalla es pequeña, usamos el encoder para scrollear 2 páginas
-		Procesar_Navegacion_Encoder(2);
+		// Ahora usamos el encoder para scrollear 3 páginas
+		Procesar_Navegacion_Encoder(3);
 
-		if (menu_index == 0) { // Página 1: Lat/Lon y Hora
+		if (menu_index == 0) { // Página 1: Lat/Lon
 			sprintf(buffer1, "Lat:%5.2f %c  ",
 					(gps_actual.latitud >= 0) ?
 							gps_actual.latitud : -gps_actual.latitud,
@@ -547,17 +547,36 @@ void Interfaz_UpdateFSM(void) {
 					(gps_actual.longitud >= 0) ? 'E' : 'W');
 			LCD_Print(0, 0, buffer1);
 			LCD_Print(1, 0, buffer2);
-		} else { // Página 2: Ángulos Euler completos
-			sprintf(buffer1, "Z:%5.1f Y:%5.1f", imu_actual.orientacion_z,
+
+		} else if (menu_index == 1) { // Página 2: Ángulos Euler completos
+			sprintf(buffer1, "Z:%5.1f Y:%5.1f ", imu_actual.orientacion_z,
 					imu_actual.inclinacion_y);
-			sprintf(buffer2, "R:%5.1f (Roll)", imu_actual.roll_x);
+			sprintf(buffer2, "R:%5.1f (Roll)  ", imu_actual.roll_x);
+			LCD_Print(0, 0, buffer1);
+			LCD_Print(1, 0, buffer2);
+
+		} else { // Página 3: Fecha, Hora UTC y Estado GPS
+			uint8_t horas = (uint8_t) gps_actual.ut_horas;
+			float temp_min = (gps_actual.ut_horas - horas) * 60.0f;
+			uint8_t minutos = (uint8_t) temp_min;
+			uint8_t segundos = (uint8_t) ((temp_min - minutos) * 60.0f);
+
+			if (gps_coordenadas_fijadas) {
+				sprintf(buffer1, "D:%02d/%02d/%02d [3D]", gps_actual.dia,
+						gps_actual.mes, (gps_actual.anio % 100));
+			} else {
+				sprintf(buffer1, "D:%02d/%02d/%02d [WT]", gps_actual.dia,
+						gps_actual.mes, (gps_actual.anio % 100));
+			}
+			sprintf(buffer2, "T:%02d:%02d:%02d UTC ", horas, minutos, segundos);
+
 			LCD_Print(0, 0, buffer1);
 			LCD_Print(1, 0, buffer2);
 		}
 
 		if (btn_presionado) {
 			currentState = STATE_MAIN_MENU;
-			menu_index = 3;
+			menu_index = 3; // Para que al volver, el cursor siga sobre "Informacion"
 			LCD_Clear();
 		}
 		break;
