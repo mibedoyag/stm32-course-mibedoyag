@@ -126,6 +126,24 @@ static uint8_t IMU_EscribirRegistro(uint8_t registro, uint8_t valor) {
     return 0; // Fallo
 }
 
+// NUEVO: Función para leer el estado interno del procesador BNO055
+static uint8_t IMU_LeerCalibracion(void) {
+    uint8_t cmd_leer[4] = {0xAA, 0x01, 0x35, 0x01};
+    uint8_t respuesta[3] = {0};
+
+    __HAL_UART_FLUSH_DRREGISTER(&huart6);
+    HAL_UART_Transmit(&huart6, cmd_leer, 4, 10);
+
+    if (HAL_UART_Receive(&huart6, respuesta, 3, 20) == HAL_OK) {
+        if (respuesta[0] == 0xBB && respuesta[1] == 0x01) {
+            return respuesta[2]; // Retorna el byte de calibración
+        }
+    }
+    return 0;
+}
+
+
+
 /* =========================================================================
  * 3. LÓGICA DE INICIALIZACIÓN
  * ========================================================================= */
@@ -136,28 +154,26 @@ void Sensores_InitLogica(void) {
 
     memset(gps_dma_buffer, 0, GPS_BUFFER_SIZE);
 
-
     uint8_t inicializacion_ok = 0;
     uint32_t intentos = 0;
 
     while (!inicializacion_ok && intentos < 3) {
+        HAL_Delay(800 + (intentos * 300));
 
-    	// 1. Tiempo indispensable para que el micro del BNO055 arranque
-    	HAL_Delay(800 + (intentos * 300));
+        // Soft-Reset para limpiar el BNO055
+        IMU_EscribirRegistro(0x3F, 0x20);
+        HAL_Delay(800);
 
-        // A. Forzar a Página 0 de memoria
-        IMU_EscribirRegistro(0x07, 0x00);
+        IMU_EscribirRegistro(0x07, 0x00); // Página 0
         HAL_Delay(30);
-
-        // B. Forzar Modo Configuración (Obligatorio antes de cambiar cualquier cosa)
-        IMU_EscribirRegistro(0x3D, 0x00);
+        IMU_EscribirRegistro(0x3D, 0x00); // Modo Config
         HAL_Delay(40);
 
-        // C. Configurar para usar el cristal externo (Más precisión para NDOF)
-        IMU_EscribirRegistro(0x3F, 0x80);
+        // Oscilador interno para clones GY-BNO055
+        IMU_EscribirRegistro(0x3F, 0x00);
         HAL_Delay(30);
 
-        // D. Cambiar a modo Fusión NDOF (0x0C)
+        // Arrancamos en modo Fusión NDOF para permitir la lectura del magnetómetro si llega a 3
         if (IMU_EscribirRegistro(0x3D, 0x0C)) {
             inicializacion_ok = 1;
             break;
@@ -305,31 +321,38 @@ void Sensores_ProcesarDatos(void) {
 		}
 	}
 
-    // B. PROCESAMIENTO IMU (UART sin bloqueos)
-    // Trama lectura: Header(0xAA) | Read(0x01) | Reg(0x1A - Euler Z) | Len(0x06 bytes)
-    uint8_t cmd_leer[4] = {0xAA, 0x01, 0x1A, 0x06};
-    uint8_t respuesta[8] = {0};
+	// B. PROCESAMIENTO IMU (UART sin bloqueos)
+	    uint8_t cmd_leer[4] = {0xAA, 0x01, 0x1A, 0x06};
+	    uint8_t respuesta[8] = {0};
 
-    __HAL_UART_FLUSH_DRREGISTER(&huart6);
-    HAL_UART_Transmit(&huart6, cmd_leer, 4, 10);
+	    __HAL_UART_FLUSH_DRREGISTER(&huart6);
+	    HAL_UART_Transmit(&huart6, cmd_leer, 4, 10);
 
-    // Esperamos 8 bytes: Header(0xBB) + Len(0x06) + 6 bytes de datos
-    if (HAL_UART_Receive(&huart6, respuesta, 8, 20) == HAL_OK) {
-        if (respuesta[0] == 0xBB && respuesta[1] == 0x06) {
+	    if (HAL_UART_Receive(&huart6, respuesta, 8, 20) == HAL_OK) {
+	        if (respuesta[0] == 0xBB && respuesta[1] == 0x06) {
 
-            int16_t yaw_raw   = (int16_t)((respuesta[3] << 8) | respuesta[2]);
-            int16_t roll_raw  = (int16_t)((respuesta[5] << 8) | respuesta[4]);
-            int16_t pitch_raw = (int16_t)((respuesta[7] << 8) | respuesta[6]);
+	            // NUEVO: Leemos cómo se siente el sensor (0 = Ciego, 3 = Perfecto)
+	            uint8_t byte_calibracion = IMU_LeerCalibracion();
+	            imu_actual.estado_calibracion = byte_calibracion & 0x03; // Solo nos interesan los bits 0 y 1 (Magnetómetro)
 
-            float azimut_magnetico = (float)yaw_raw / 16.0f;
-            float azimut_verdadero = azimut_magnetico + gps_actual.declinacion_mag;
+	            int16_t yaw_raw   = (int16_t)((respuesta[3] << 8) | respuesta[2]);
+	            int16_t roll_raw  = (int16_t)((respuesta[5] << 8) | respuesta[4]);
+	            int16_t pitch_raw = (int16_t)((respuesta[7] << 8) | respuesta[6]);
 
-            if (azimut_verdadero < 0.0f) azimut_verdadero += 360.0f;
-            if (azimut_verdadero >= 360.0f) azimut_verdadero -= 360.0f;
+	            float azimut_magnetico = (float)yaw_raw / 16.0f;
+	            float azimut_verdadero = azimut_magnetico + gps_actual.declinacion_mag;
 
-            imu_actual.orientacion_z = azimut_verdadero;
-            imu_actual.roll_x        = (float)roll_raw / 16.0f;
-            imu_actual.inclinacion_y = (float)pitch_raw / 16.0f;
-        }
-    }
-}
+	            if (azimut_verdadero < 0.0f) azimut_verdadero += 360.0f;
+	            if (azimut_verdadero >= 360.0f) azimut_verdadero -= 360.0f;
+
+	            // BLOQUEO LÓGICO: Solo actualizamos Z si la brújula ya salió de 0
+	            // Si está en 0, conservamos el último valor conocido para no tragarnos el Cero falso.
+	            if (imu_actual.estado_calibracion > 0) {
+	                imu_actual.orientacion_z = azimut_verdadero;
+	            }
+
+	            imu_actual.roll_x        = (float)roll_raw / 16.0f;
+	            imu_actual.inclinacion_y = (float)pitch_raw / 16.0f;
+	        }
+	    }
+	}

@@ -17,6 +17,7 @@ typedef struct {
     float inclinacion_y; // Pitch (Altitud del tubo: -180 a +180 grados)
     float roll_x;        // Roll (Alabeo: -90 a +90)
     int8_t temperatura;  // Temperatura interna del chip en °C
+    uint8_t estado_calibracion;
 } DatosIMU_t;
 
 /* Estructura para almacenar los datos vitales del GPS */
@@ -46,5 +47,9 @@ extern DatosGPS_t gps_actual;
 /* Prototipos de funciones públicas */
 void Sensores_InitLogica(void);
 void Sensores_ProcesarDatos(void);
+
+/* Definición del tamaño del bloque de calibración del BNO055 */
+#define BNO055_CALIB_DATA_SIZE 22
+
 
 #endif // PROYECTO_SENSORES_H

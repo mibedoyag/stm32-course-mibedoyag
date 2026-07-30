@@ -23,6 +23,8 @@ typedef enum {
     SPEED_BUSCAR = 2   // Velocidad máxima (GoTo rápido)
 } VelocidadModo_t;
 
+extern VelocidadModo_t velocidad_actual; //SE hace pública la variable para que desde interfaz.c la pantalla LCD la pueda leer para mostrarla
+
 /* Estructura para almacenar las lecturas del ADC del Joystick */
 typedef struct {
     uint16_t eje_x; // Lectura cruda ADC (Azimut)

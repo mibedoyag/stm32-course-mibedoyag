@@ -151,6 +151,44 @@ static uint8_t Leer_Boton_Select(void) {
 	return 0; // Sin clics nuevos
 }
 
+/**
+ * @brief Lógica para leer el botón Speed (PB12) con filtro RC.
+ */
+static uint8_t Leer_Boton_Speed(void) {
+	static uint8_t boton_speed_anterior = 0;
+
+	if (HAL_GetTick() < 500) return 0; // Filtro de arranque
+
+	uint8_t estado_pin = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12); // PB12
+
+	if (estado_pin == GPIO_PIN_RESET) {
+		if (!boton_speed_anterior) {
+			boton_speed_anterior = 1;
+			return 1;
+		}
+	} else {
+		boton_speed_anterior = 0;
+	}
+	return 0;
+}
+
+static uint8_t Leer_Boton_Sync(void) {
+	static uint8_t boton_sync_anterior = 0;
+	if (HAL_GetTick() < 500) return 0;
+
+	uint8_t estado_pin = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13); // PB13
+
+	if (estado_pin == GPIO_PIN_RESET) {
+		if (!boton_sync_anterior) {
+			boton_sync_anterior = 1;
+			return 1;
+		}
+	} else {
+		boton_sync_anterior = 0;
+	}
+	return 0;
+}
+
 /* =========================================================================
  * CONFIGURACIÓN DE HARDWARE: ENCODER Y BOTONES
  * ========================================================================= */
@@ -197,20 +235,12 @@ void Interfaz_Controles_Init(void) {
 
 	HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
 
-	/* 2. BOTONES (PB12 y PB13 mantienen IT, PB14 pasa a entrada pura para el filtro RC) */
-	GPIO_InitStruct.Pin = GPIO_PIN_12 | GPIO_PIN_13;
-	GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+	// PB14 (Select), PB13 (Sync) y PB12 (Speed) pasan a entrada pura para sus filtros RC físicos
+	GPIO_InitStruct.Pin = GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14;
+	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
 	GPIO_InitStruct.Pull = GPIO_PULLUP;
 	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-	// Configuración dedicada para el botón de selección con filtro RC
-	GPIO_InitStruct.Pin = GPIO_PIN_14;
-	GPIO_InitStruct.Mode = GPIO_MODE_INPUT; // Entrada digital normal, sin interrupción
-	GPIO_InitStruct.Pull = GPIO_PULLUP;    // Mantiene el pull-up activo
-	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-	HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
-	HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
 
 void Interfaz_LeerEncoder(void) {
@@ -261,29 +291,35 @@ void Interfaz_UpdateFSM(void) {
 	// 1. Lectura obligatoria de hardware
 	Interfaz_LeerEncoder();
 
-	// --- NUEVO: SISTEMA DE LATCHING (CANDADO DE MEMORIA) ---
+	// --- SISTEMA DE LATCHING (CANDADO DE MEMORIA) ---
 	static uint8_t flag_clic_pendiente = 0;
+	static uint8_t flag_speed_pendiente = 0;
+	static uint8_t flag_sync_pendiente = 0;
 
-	// Leemos el botón. Si detecta un clic válido, lo guardamos permanentemente
-	// en la variable estática hasta que la FSM lo consuma.
-	if (Leer_Boton_Select()) {
-		flag_clic_pendiente = 1;
-	}
+	if (Leer_Boton_Select()) flag_clic_pendiente = 1;
+	if (Leer_Boton_Speed()) flag_speed_pendiente = 1;
+	if (Leer_Boton_Sync()) flag_sync_pendiente = 1;
+
 
 	char buffer1[20];
 	char buffer2[20];
 
-	// 2. Control de Tasa de Refresco (200ms) para no saturar I2C
+	// 2. Control de Tasa de Refresco (200ms)
 	static uint32_t ultimo_refresco = 0;
 	if (HAL_GetTick() - ultimo_refresco < 200) {
-		return; // Salimos de la función, PERO el clic quedó a salvo en flag_clic_pendiente
+		return;
 	}
 	ultimo_refresco = HAL_GetTick();
 
-	// 3. Descargamos el clic pendiente en la variable local para este ciclo
-	// y limpiamos la bandera para permitir futuros clics.
+	// 3. Descargamos los clics pendientes
 	uint8_t btn_presionado = flag_clic_pendiente;
 	flag_clic_pendiente = 0;
+
+	uint8_t btn_speed_pres = flag_speed_pendiente;
+	flag_speed_pendiente = 0;
+
+	uint8_t btn_sync_pres = flag_sync_pendiente;
+	flag_sync_pendiente = 0;
 
 	// 4. Evaluación de Estados
 	switch (currentState) {
@@ -352,19 +388,45 @@ void Interfaz_UpdateFSM(void) {
 		/* --------------------------------------------------
 		 * MODO 1: MANUAL (Joystick Activo)
 		 * -------------------------------------------------- */
-	case STATE_MANUAL:
-		// Acá motores.c lee el ADC y mueve la montura. Solo mostramos datos.
+	case STATE_MANUAL: {
+		// 1. Si se presiona el botón SPEED, ciclamos la velocidad
+		if (btn_speed_pres) {
+			VelocidadModo_t nueva_vel;
+			if (velocidad_actual == SPEED_GUIAR)
+				nueva_vel = SPEED_CENTRAR;
+			else if (velocidad_actual == SPEED_CENTRAR)
+				nueva_vel = SPEED_BUSCAR;
+			else
+				nueva_vel = SPEED_GUIAR;
+
+			Motores_SetVelocidadGlobal(nueva_vel);
+		}
+
+		// 2. Determinamos el texto para la LCD según la variable global
+		const char *str_vel;
+		if (velocidad_actual == SPEED_GUIAR)
+			str_vel = "GUIAR";
+		else if (velocidad_actual == SPEED_CENTRAR)
+			str_vel = "CENTR";
+		else
+			str_vel = "BUSCA";
+
+		// 3. Imprimimos en pantalla (Fila 0: IMU, Fila 1: Velocidad y Salida)
 		sprintf(buffer1, "Z:%5.1f Y:%5.1f ", imu_actual.orientacion_z,
 				imu_actual.inclinacion_y);
 		LCD_Print(0, 0, buffer1);
-		LCD_Print(1, 0, "  [SELECT = OUT] ");
 
+		sprintf(buffer2, "V:%s [SEL=OUT]", str_vel); // Ej: "V:BUSCA [SEL=OUT]"
+		LCD_Print(1, 0, buffer2);
+
+		// 4. Si se presiona el SELECT, salimos al menú
 		if (btn_presionado) {
 			currentState = STATE_MAIN_MENU;
-			menu_index = 0; // Regresar a la opción manual del menú
+			menu_index = 0;
 			LCD_Clear();
 		}
 		break;
+	}
 
 		/* --------------------------------------------------
 		 * MODO 2: OFFLINE (Base de Datos)
@@ -500,21 +562,29 @@ void Interfaz_UpdateFSM(void) {
 			LCD_Clear();
 		}
 		break;
-
 	case STATE_TRACKING:
-		LCD_Print(0, 0, ">> TRACKING <<  ");
-		sprintf(buffer2, "Z:%4.0f Y:%4.0f", imu_actual.orientacion_z,
-				imu_actual.inclinacion_y);
-		LCD_Print(1, 0, buffer2);
+			LCD_Print(0, 0, ">> TRACKING <<  ");
+			sprintf(buffer2, "Z:%4.0f Y:%4.0f", imu_actual.orientacion_z,
+					imu_actual.inclinacion_y);
+			LCD_Print(1, 0, buffer2);
 
-		if (btn_presionado) {
-			// TODO: Enviar comando de parada a los motores
-			currentState = STATE_OFFLINE_CATALOGO;
-			menu_index = 0;
-			LCD_Clear();
-		}
-		break;
+			// Si el usuario centra la estrella con el joystick y presiona SYNC (PB13):
+			if (btn_sync_pres) {
+				// Sincronizamos usando la posición actual de los motores/IMU
+				Astronomia_SyncOffset(imu_actual.inclinacion_y, imu_actual.orientacion_z);
 
+				LCD_Clear();
+				LCD_Print(0, 0, "Estrella Sync OK!");
+				HAL_Delay(1500);
+				LCD_Clear();
+			}
+
+			if (btn_presionado) {
+				currentState = STATE_OFFLINE_CATALOGO;
+				menu_index = 0;
+				LCD_Clear();
+			}
+			break;
 		/* --------------------------------------------------
 		 * MODO 3: ONLINE (Serial)
 		 * -------------------------------------------------- */
@@ -548,14 +618,15 @@ void Interfaz_UpdateFSM(void) {
 			LCD_Print(0, 0, buffer1);
 			LCD_Print(1, 0, buffer2);
 
-		} else if (menu_index == 1) { // Página 2: Ángulos Euler completos
-			sprintf(buffer1, "Z:%5.1f Y:%5.1f ", imu_actual.orientacion_z,
-					imu_actual.inclinacion_y);
-			sprintf(buffer2, "R:%5.1f (Roll)  ", imu_actual.roll_x);
-			LCD_Print(0, 0, buffer1);
-			LCD_Print(1, 0, buffer2);
+		} else if (menu_index == 1) { // Página 2: Ángulos Euler y Calibración
+					sprintf(buffer1, "Z:%5.1f Y:%5.1f ", imu_actual.orientacion_z,
+							imu_actual.inclinacion_y);
+					sprintf(buffer2, "Mag Calib: %d    ", imu_actual.estado_calibracion);
+					LCD_Print(0, 0, buffer1);
+					LCD_Print(1, 0, buffer2);
+				}
 
-		} else { // Página 3: Fecha, Hora UTC y Estado GPS
+		 else { // Página 3: Fecha, Hora UTC y Estado GPS
 			uint8_t horas = (uint8_t) gps_actual.ut_horas;
 			float temp_min = (gps_actual.ut_horas - horas) * 60.0f;
 			uint8_t minutos = (uint8_t) temp_min;
@@ -592,10 +663,3 @@ void Interfaz_UpdateFSM(void) {
 	}
 }
 
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-	if (GPIO_Pin == GPIO_PIN_12)
-		flag_btn_speed = 1;
-	else if (GPIO_Pin == GPIO_PIN_13)
-		flag_btn_sync = 1;
-	// else if (GPIO_Pin == GPIO_PIN_14) flag_btn_select = 1;
-}

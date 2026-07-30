@@ -8,6 +8,7 @@
 #include "Proyecto/motores.h"
 #include "Proyecto/interfaz.h"
 #include "stm32f4xx_hal.h"
+#include "Proyecto/sensores.h"
 #include <math.h>
 
 /* Instancias globales de los periféricos.
@@ -46,6 +47,8 @@ typedef enum {
     HOME_ALT_FAST,    // Acercamiento rápido Eje Altitud
     HOME_ALT_BACKOFF, // Retroceso
     HOME_ALT_SLOW,    // Acercamiento micrométrico Eje Altitud
+	HOME_ALIGN_IMU,  //Alineación post finales de carrera con los angulos euler de la IMU
+	HOME_WAIT_GOTO,
     HOME_DONE
 } HomingState_t;
 
@@ -242,6 +245,9 @@ void Motores_InitLogica(void) {
     Motores_ADC_Init();
     Motores_TIM_Init();
 
+    //Espera crítica: El BNO055 necesita 2 segundos para cargar su firmware de fusión
+	HAL_Delay(2000);
+
     // 2. Inicialización segura del Joystick en la zona muerta
     joystick_actual.eje_x = 2048;
     joystick_actual.eje_y = 2048;
@@ -279,53 +285,104 @@ void Motores_SetVelocidadGlobal(VelocidadModo_t nueva_velocidad) {
 }
 
 /**
- * @brief Lógica de evaluación periódica del sistema de movimiento.
+ * @brief Lógica de evaluación periódica del sistema de movimiento con suavizado ADC y velocidad global.
  */
 void Motores_UpdateLogica(void) {
+    // 1. PROTECCIÓN DE HOMING: Si el Homing está activo, delegar el control
+    if (estado_homing != HOME_DONE) {
+        Motores_UpdateHoming();
+        return;
+    }
 
-	// PROTECCIÓN DE SISTEMA: Si el Homing está activo, delegar el control y salir
-	if (estado_homing != HOME_DONE) {
-		Motores_UpdateHoming();
-		return;
-	}
+    // 2. PROTECCIÓN DE MENÚS Y ESTADOS AUTOMÁTICOS
+    if (currentState != STATE_MANUAL) {
+        // Apagamos los motores de forma limpia si salimos del modo manual
+        HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+        HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+        return;
+    }
 
-	// Si ya terminó el homing, el usuario recupera el control analógico
-	Motores_LeerJoystick();
+    // 3. LECTURA Y FILTRADO SUAVIZADO DEL JOYSTICK (Filtro Anti-Jitter)
+    // Promediamos las lecturas instantáneas del DMA para evitar ruido eléctrico en los pines analógicos
+    static uint16_t filtro_x = 2048;
+    static uint16_t filtro_y = 2048;
 
-    // [IMPORTANTE: Se asume que currentState se lee globalmente o se inyecta.
-    // Para compilar este fragmento aislado, omito el if(currentState == STATE_MANUAL)
-    // y proceso directamente. Ajusta esto según cómo inyectes la variable de estado].
+    // Suavizado exponencial (90% valor anterior + 10% lectura nueva)
+    filtro_x = (uint16_t)(((uint32_t)filtro_x * 9 + adc_dma_buffer[0]) / 10);
+    filtro_y = (uint16_t)(((uint32_t)filtro_y * 9 + adc_dma_buffer[1]) / 10);
 
-    Motores_LeerJoystick();
+    joystick_actual.eje_x = filtro_x;
+    joystick_actual.eje_y = filtro_y;
+
+    // 4. APLICAR LA VELOCIDAD GLOBAL ACTUALIZADA POR EL BOTÓN SPEED
+    // Asegura que el motor responda al perfil elegido (GUIAR, CENTRAR, BUSCAR)
+    uint32_t arr_activo = arr_buscar;
+    if (velocidad_actual == SPEED_GUIAR)      arr_activo = arr_guiar;
+    else if (velocidad_actual == SPEED_CENTRAR) arr_activo = arr_centrar;
+    else if (velocidad_actual == SPEED_BUSCAR)  arr_activo = arr_buscar;
+
+    // Actualizamos el Timer 2 (Azimut) con la velocidad seleccionada
+    __HAL_TIM_SET_AUTORELOAD(&htim2, arr_activo);
+    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, arr_activo / 2);
+
+    // Actualizamos el Timer 3 (Altitud) con la velocidad seleccionada
+    __HAL_TIM_SET_AUTORELOAD(&htim3, arr_activo);
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, arr_activo / 2);
+
+    // Latches de estado para evitar llamadas redundantes a las funciones HAL
+    static uint8_t az_estado = 0;  // 0 = Detenido, 1 = Izq, 2 = Der
+    static uint8_t alt_estado = 0; // 0 = Detenido, 1 = Arr, 2 = Aba
 
     // ---------------------------------------------------------
     // EVALUACIÓN EJE X (AZIMUT - TIM2)
     // ---------------------------------------------------------
     if (joystick_actual.eje_x < (2048 - JOYSTICK_DEADZONE)) {
-        HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
-        HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+        if (az_estado != 1) {
+            HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+            HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
+            HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+            az_estado = 1;
+        }
     }
     else if (joystick_actual.eje_x > (2048 + JOYSTICK_DEADZONE)) {
-        HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
-        HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+        if (az_estado != 2) {
+            HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+            HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
+            HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+            az_estado = 2;
+        }
     }
     else {
-        HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+        if (az_estado != 0) {
+            HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+            az_estado = 0;
+        }
     }
 
     // ---------------------------------------------------------
     // EVALUACIÓN EJE Y (ALTITUD - TIM3)
     // ---------------------------------------------------------
     if (joystick_actual.eje_y < (2048 - JOYSTICK_DEADZONE)) {
-        HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
-        HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+        if (alt_estado != 1) {
+            HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+            HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
+            HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+            alt_estado = 1;
+        }
     }
     else if (joystick_actual.eje_y > (2048 + JOYSTICK_DEADZONE)) {
-        HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
-        HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+        if (alt_estado != 2) {
+            HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+            HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
+            HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+            alt_estado = 2;
+        }
     }
     else {
-        HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+        if (alt_estado != 0) {
+            HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+            alt_estado = 0;
+        }
     }
 }
 
@@ -384,111 +441,129 @@ void Motores_DetenerGoTo(void) {
 }
 
 
+/* Variables globales para control de tiempo y estado del Homing */
+static uint32_t temporizador_homing = 0;
+static uint32_t tiempo_inicio_homing = 0; // Para el timeout de los 2 minutos de la brújula
+
 /**
- * @brief Prepara las variables y arranca la calibración del eje Azimut.
+ * @brief Prepara las variables y arranca la calibración del eje Altitud.
+ * El eje Azimut ya no usa interruptor físico.
  */
 void Motores_IniciarHoming(void) {
-    flag_homing_ok = 0;
-    estado_homing = HOME_AZ_FAST;
+	flag_homing_ok = 0;
+	estado_homing = HOME_ALT_FAST; // Arrancamos directo con la altura
+	temporizador_homing = HAL_GetTick();
+	tiempo_inicio_homing = HAL_GetTick(); // Iniciamos conteo de los 2 minutos
 
-    // Configurar dirección hacia el final de carrera (Asumimos RESET es avanzar)
-    HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
+	// Apagamos azimut por completo
+	HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
 
-    // Configurar velocidad rápida y arrancar generador de PWM (sin interrupción)
-    __HAL_TIM_SET_AUTORELOAD(&htim2, arr_centrar);
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, arr_centrar / 2);
-    HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+	// Arrancamos Altitud hacia el switch
+	HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
+	__HAL_TIM_SET_AUTORELOAD(&htim3, arr_centrar);
+	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, arr_centrar / 2);
+	HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
 }
 
 /**
- * @brief Sub-máquina de estados no bloqueante para el Homing de doble etapa.
+ * @brief Sub-máquina de estados no bloqueante para el Homing Híbrido (Solo Altitud + Brújula Oportunista).
  */
 void Motores_UpdateHoming(void) {
-    if (estado_homing == HOME_IDLE || estado_homing == HOME_DONE) return;
+	if (estado_homing == HOME_IDLE || estado_homing == HOME_DONE)
+		return;
 
-    // Leemos el estado eléctrico de ambos sensores (0V = Tocado)
-    uint8_t limit_az = HAL_GPIO_ReadPin(LIMIT_AZ_PORT, LIMIT_AZ_PIN);
-    uint8_t limit_alt = HAL_GPIO_ReadPin(LIMIT_ALT_PORT, LIMIT_ALT_PIN);
+	uint8_t limit_alt = HAL_GPIO_ReadPin(LIMIT_ALT_PORT, LIMIT_ALT_PIN);
 
-    switch (estado_homing) {
+	switch (estado_homing) {
 
-        /* --- SECUENCIA EJE AZIMUT --- */
-        case HOME_AZ_FAST:
-            if (limit_az == GPIO_PIN_RESET) { // Contacto detectado a alta velocidad
-                HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1); // Freno de emergencia
-                HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET); // Reversa
-                HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-                estado_homing = HOME_AZ_BACKOFF;
-            }
-            break;
+	/* --- SECUENCIA EJE ALTITUD (Único switch físico) --- */
+	case HOME_ALT_FAST:
+		if (limit_alt == GPIO_PIN_RESET
+				&& (HAL_GetTick() - temporizador_homing > 200)) {
+			HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+			HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
+			HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+			temporizador_homing = HAL_GetTick();
+			estado_homing = HOME_ALT_BACKOFF;
+		}
+		break;
 
-        case HOME_AZ_BACKOFF:
-            if (limit_az == GPIO_PIN_SET) { // El switch se liberó eléctricamente
-                HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-                HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET); // Hacia adelante
+	case HOME_ALT_BACKOFF:
+		if (limit_alt == GPIO_PIN_SET
+				&& (HAL_GetTick() - temporizador_homing > 200)) {
+			HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+			HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
 
-                // Disminuimos la velocidad al mínimo absoluto (Ajuste Fino)
-                __HAL_TIM_SET_AUTORELOAD(&htim2, arr_guiar);
-                __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, arr_guiar / 2);
-                HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+			__HAL_TIM_SET_AUTORELOAD(&htim3, arr_guiar);
+			__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, arr_guiar / 2);
+			HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
 
-                estado_homing = HOME_AZ_SLOW;
-            }
-            break;
+			temporizador_homing = HAL_GetTick();
+			estado_homing = HOME_ALT_SLOW;
+		}
+		break;
 
-        case HOME_AZ_SLOW:
-            if (limit_az == GPIO_PIN_RESET) { // Contacto micrométrico detectado
-                HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-                posicion_actual_az = 0.0f; // ¡Azimut Calibrado! Cero absoluto fijado.
+	case HOME_ALT_SLOW:
+		if (limit_alt == GPIO_PIN_RESET
+				&& (HAL_GetTick() - temporizador_homing > 200)) {
+			HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+			HAL_Delay(300); // Estabilización mecánica
 
-                // Arrancamos el mismo proceso para la Altitud
-                HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
-                __HAL_TIM_SET_AUTORELOAD(&htim3, arr_buscar);
-                __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, arr_buscar / 2);
-                HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
-                estado_homing = HOME_ALT_FAST;
-            }
-            break;
+			// Capturamos la altura actual reportada por la IMU
+			posicion_actual_alt = imu_actual.inclinacion_y;
 
-        /* --- SECUENCIA EJE ALTITUD --- */
-        case HOME_ALT_FAST:
-            if (limit_alt == GPIO_PIN_RESET) {
-                HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-                HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
-                HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
-                estado_homing = HOME_ALT_BACKOFF;
-            }
-            break;
+			// Pasamos al estado de espera de Azimut / Brújula Oportunista
+			estado_homing = HOME_ALIGN_IMU;
+		}
+		break;
 
-        case HOME_ALT_BACKOFF:
-            if (limit_alt == GPIO_PIN_SET) {
-                HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-                HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
+		/* --- AZIMUT OPORTUNISTA + TIMEOUT DE 2 MINUTOS --- */
+	case HOME_ALIGN_IMU: {
+	            uint32_t tiempo_transcurrido = HAL_GetTick() - tiempo_inicio_homing;
+	            uint8_t condicion_mag = (imu_actual.estado_calibracion == 3);
+	            uint8_t timeout_cumplido = (tiempo_transcurrido > 120000); // 2 minutos = 120,000 ms
 
-                __HAL_TIM_SET_AUTORELOAD(&htim3, arr_guiar);
-                __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, arr_guiar / 2);
-                HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+	            if (condicion_mag || timeout_cumplido) {
 
-                estado_homing = HOME_ALT_SLOW;
-            }
-            break;
+	                // 1. Guardamos la posición actual como memoria estática
+	                if (condicion_mag) {
+	                    posicion_actual_az = imu_actual.orientacion_z;
+	                } else {
+	                    posicion_actual_az = 0.0f; // Timeout superado
+	                }
+	                posicion_actual_alt = imu_actual.inclinacion_y;
 
-        case HOME_ALT_SLOW:
-            if (limit_alt == GPIO_PIN_RESET) {
-                HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-                posicion_actual_alt = 0.0f; // ¡Altitud Calibrada!
+	                // 2. Pasamos a sala de espera ANTES de disparar
+	                estado_homing = HOME_WAIT_GOTO;
 
-                // ¡Homing Exitoso! Levantamos la bandera para la pantalla LCD
-                flag_homing_ok = 1;
-                estado_homing = HOME_DONE;
-            }
-            break;
+	                // 3. DISPARO ÚNICO Y CORREGIDO: Viajar al cero absoluto (0.0, 0.0)
+	                Motores_SetVelocidadGlobal(SPEED_CENTRAR);
+	                Motores_Apuntar(0.0f, 0.0f); // ¡Ahora sí viaja al cero!
+	            }
+	            break;
+	        }
 
-        default:
-            break;
-    }
+	case HOME_WAIT_GOTO:
+		// Esperamos de forma pasiva a que el hardware de interrupciones de los Timers
+		// (HAL_TIM_PWM_PulseFinishedCallback) baje las banderas de llegada.
+		if (flag_goto_terminado_az && flag_goto_terminado_alt) {
+			posicion_actual_az = 0.0f;
+			posicion_actual_alt = 0.0f; // Cero absoluto del horizonte
+
+			Motores_SetVelocidadGlobal(SPEED_BUSCAR);
+			flag_homing_ok = 1; // ¡Liberamos la FSM principal al Menú!
+			estado_homing = HOME_DONE;
+		}
+		break;
+
+	case HOME_DONE:
+		// Vacío, el control ya pasó a la función Motores_UpdateLogica
+		break;
+
+	default:
+		break;
+	}
 }
-
 
 /* =========================================================================
  * CALLBACKS DE INTERRUPCIÓN (HAL)
