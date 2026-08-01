@@ -30,6 +30,7 @@ static uint8_t catalogo_seleccionado = 0; // 0 = Messier, 1 = Estrellas
 static uint8_t objeto_seleccionado = 0;   // Índice del 0 al 19 (o 9)
 static uint8_t total_objetos_actual = 20; // Tamaño del catálogo actual
 
+
 /* =========================================================================
  * DRIVERS DE LA LCD (Se mantienen idénticos a los tuyos)
  * ========================================================================= */
@@ -588,16 +589,20 @@ void Interfaz_UpdateFSM(void) {
 		/* --------------------------------------------------
 		 * MODO 3: ONLINE (Serial)
 		 * -------------------------------------------------- */
-	case STATE_ONLINE:
-		LCD_Print(0, 0, "LINK: STELLARIUM");
-		LCD_Print(1, 0, "Escuchando UART.");
+	case STATE_ONLINE: {
+	        char buf_debug[17];
+	        //sprintf(buf_debug, "Bytes RX: %lu", debug_rx_bytes);
 
-		if (btn_presionado) {
-			currentState = STATE_MAIN_MENU;
-			menu_index = 2;
-			LCD_Clear();
-		}
-		break;
+	        LCD_Print(0, 0, "LINK: STELLARIUM");
+	        LCD_Print(1, 0, buf_debug); // Pantalla mostrará: "Bytes RX: 0"
+
+	        if (btn_presionado) {
+	            currentState = STATE_MAIN_MENU;
+	            menu_index = 2;
+	            LCD_Clear();
+	        }
+	        break;
+	    }
 
 		/* --------------------------------------------------
 		 * INFO EXTRA (Coordenadas y Euler)

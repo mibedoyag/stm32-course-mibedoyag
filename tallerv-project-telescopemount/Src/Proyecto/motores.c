@@ -311,13 +311,22 @@ void Motores_UpdateLogica(void) {
         return;
     }
 
+    // --- EL FIX: Memoria del estado anterior ---
+    static SystemState_t estado_anterior = STATE_BOOTING;
+
     // 2. PROTECCIÓN DE MENÚS Y ESTADOS AUTOMÁTICOS
     if (currentState != STATE_MANUAL) {
-        // Apagamos los motores de forma limpia si salimos del modo manual
-        HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-        HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+        // SOLO apagamos los motores si en el ciclo anterior estábamos en modo manual.
+        // Esto evita apagar los motores mientras están viajando en modo GOTO (STATE_MOVIENDO).
+        if (estado_anterior == STATE_MANUAL) {
+            HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+            HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+        }
+        estado_anterior = currentState; // Actualizamos la memoria
         return;
     }
+
+    estado_anterior = currentState; // Actualizamos la memoria estando en manual
 
     // 3. LECTURA Y FILTRADO SUAVIZADO DEL JOYSTICK (Filtro Anti-Jitter)
     // Promediamos las lecturas instantáneas del DMA para evitar ruido eléctrico en los pines analógicos
