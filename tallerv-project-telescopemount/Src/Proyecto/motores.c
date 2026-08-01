@@ -22,6 +22,10 @@ DMA_HandleTypeDef hdma_adc1; // DMA para el ADC1
 /* Buffer donde el hardware DMA depositará continuamente las lecturas del Joystick (X e Y) */
 volatile uint16_t adc_dma_buffer[2] = {2048, 2048};
 
+// NUEVO: Variables para guardar el centro físico real del joystick
+static uint16_t joy_centro_x = 2048;
+static uint16_t joy_centro_y = 2048;
+
 /* Definición de Pines Físicos */
 #define AZ_DIR_PORT  GPIOA
 #define AZ_DIR_PIN   GPIO_PIN_4 // PA4
@@ -95,13 +99,16 @@ static void Motores_GPIO_Init(void) {
     // 2. Pin PWM Azimut (TIM2_CH1) -> PA0
     GPIO_InitStruct.Pin = GPIO_PIN_0;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF1_TIM2;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     // 3. Pin PWM Altitud (TIM3_CH1) -> PA6
     GPIO_InitStruct.Pin = GPIO_PIN_6;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF2_TIM3;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
@@ -260,6 +267,12 @@ void Motores_InitLogica(void) {
     // 4. Iniciar la recolección asíncrona de datos del Joystick vía DMA
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_dma_buffer, 2);
 
+    // NUEVO: Autocalibración del Joystick.
+	// Leemos dónde descansa físicamente el resorte y lo guardamos como el "Cero".
+	HAL_Delay(100);
+	joy_centro_x = adc_dma_buffer[0];
+	joy_centro_y = adc_dma_buffer[1];
+
     // 5. Arrancar el proceso de calibración absoluta al finalizar la inicialización
     Motores_IniciarHoming();
 }
@@ -277,11 +290,15 @@ void Motores_SetVelocidadGlobal(VelocidadModo_t nueva_velocidad) {
         case SPEED_GUIAR:   nuevo_arr = arr_guiar;   break;
     }
 
-    __HAL_TIM_SET_AUTORELOAD(&htim2, nuevo_arr);
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, nuevo_arr / 2);
+	// Actualizamos TIM2 y reiniciamos su contador a 0 para evitar el bloqueo de 32-bits
+	__HAL_TIM_SET_AUTORELOAD(&htim2, nuevo_arr);
+	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, nuevo_arr / 2);
+	__HAL_TIM_SET_COUNTER(&htim2, 0);
 
-    __HAL_TIM_SET_AUTORELOAD(&htim3, nuevo_arr);
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, nuevo_arr / 2);
+	// Actualizamos TIM3 y reiniciamos su contador a 0
+	__HAL_TIM_SET_AUTORELOAD(&htim3, nuevo_arr);
+	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, nuevo_arr / 2);
+	__HAL_TIM_SET_COUNTER(&htim3, 0);
 }
 
 /**
@@ -314,7 +331,7 @@ void Motores_UpdateLogica(void) {
     joystick_actual.eje_x = filtro_x;
     joystick_actual.eje_y = filtro_y;
 
-    // 4. APLICAR LA VELOCIDAD GLOBAL ACTUALIZADA POR EL BOTÓN SPEED
+    /*// 4. APLICAR LA VELOCIDAD GLOBAL ACTUALIZADA POR EL BOTÓN SPEED
     // Asegura que el motor responda al perfil elegido (GUIAR, CENTRAR, BUSCAR)
     uint32_t arr_activo = arr_buscar;
     if (velocidad_actual == SPEED_GUIAR)      arr_activo = arr_guiar;
@@ -327,63 +344,63 @@ void Motores_UpdateLogica(void) {
 
     // Actualizamos el Timer 3 (Altitud) con la velocidad seleccionada
     __HAL_TIM_SET_AUTORELOAD(&htim3, arr_activo);
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, arr_activo / 2);
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, arr_activo / 2);*/
 
     // Latches de estado para evitar llamadas redundantes a las funciones HAL
     static uint8_t az_estado = 0;  // 0 = Detenido, 1 = Izq, 2 = Der
     static uint8_t alt_estado = 0; // 0 = Detenido, 1 = Arr, 2 = Aba
 
     // ---------------------------------------------------------
-    // EVALUACIÓN EJE X (AZIMUT - TIM2)
-    // ---------------------------------------------------------
-    if (joystick_actual.eje_x < (2048 - JOYSTICK_DEADZONE)) {
-        if (az_estado != 1) {
-            HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-            HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
-            HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-            az_estado = 1;
+        // EVALUACIÓN EJE X (AZIMUT - TIM2)
+        // ---------------------------------------------------------
+        if (joystick_actual.eje_x < (joy_centro_x - JOYSTICK_DEADZONE)) {
+            if (az_estado != 1) { // Latch: Arranca una SOLA vez
+                HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+                HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
+                HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+                az_estado = 1;
+            }
         }
-    }
-    else if (joystick_actual.eje_x > (2048 + JOYSTICK_DEADZONE)) {
-        if (az_estado != 2) {
-            HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-            HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
-            HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-            az_estado = 2;
+        else if (joystick_actual.eje_x > (joy_centro_x + JOYSTICK_DEADZONE)) {
+            if (az_estado != 2) {
+                HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+                HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
+                HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+                az_estado = 2;
+            }
         }
-    }
-    else {
-        if (az_estado != 0) {
-            HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-            az_estado = 0;
+        else {
+            if (az_estado != 0) { // Frena una SOLA vez
+                HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+                az_estado = 0;
+            }
         }
-    }
 
-    // ---------------------------------------------------------
-    // EVALUACIÓN EJE Y (ALTITUD - TIM3)
-    // ---------------------------------------------------------
-    if (joystick_actual.eje_y < (2048 - JOYSTICK_DEADZONE)) {
-        if (alt_estado != 1) {
-            HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-            HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
-            HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
-            alt_estado = 1;
+        // ---------------------------------------------------------
+        // EVALUACIÓN EJE Y (ALTITUD - TIM3)
+        // ---------------------------------------------------------
+        if (joystick_actual.eje_y < (joy_centro_y - JOYSTICK_DEADZONE)) {
+            if (alt_estado != 1) {
+                HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+                HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
+                HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+                alt_estado = 1;
+            }
         }
-    }
-    else if (joystick_actual.eje_y > (2048 + JOYSTICK_DEADZONE)) {
-        if (alt_estado != 2) {
-            HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-            HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
-            HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
-            alt_estado = 2;
+        else if (joystick_actual.eje_y > (joy_centro_y + JOYSTICK_DEADZONE)) {
+            if (alt_estado != 2) {
+                HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+                HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
+                HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+                alt_estado = 2;
+            }
         }
-    }
-    else {
-        if (alt_estado != 0) {
-            HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-            alt_estado = 0;
+        else {
+            if (alt_estado != 0) {
+                HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+                alt_estado = 0;
+            }
         }
-    }
 }
 
 /**
@@ -521,7 +538,7 @@ void Motores_UpdateHoming(void) {
 	case HOME_ALIGN_IMU: {
 	            uint32_t tiempo_transcurrido = HAL_GetTick() - tiempo_inicio_homing;
 	            uint8_t condicion_mag = (imu_actual.estado_calibracion == 3);
-	            uint8_t timeout_cumplido = (tiempo_transcurrido > 120000); // 2 minutos = 120,000 ms
+	            uint8_t timeout_cumplido = (tiempo_transcurrido > 30000); // 2 minutos = 120,000 ms
 
 	            if (condicion_mag || timeout_cumplido) {
 

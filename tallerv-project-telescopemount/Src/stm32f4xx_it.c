@@ -20,6 +20,8 @@ extern TIM_HandleTypeDef htim4;
 extern TIM_HandleTypeDef htim10;
 extern TIM_HandleTypeDef htim2; // Manejador del Timer 2 (Eje Azimut)
 extern TIM_HandleTypeDef htim3; // Manejador del Timer 3 (Eje Altitud)
+
+extern UART_HandleTypeDef huart2;
 /* ====================================================================
 * INTERRUPCIONES DEL SISTEMA BASE
 * ==================================================================== */
@@ -27,21 +29,7 @@ extern TIM_HandleTypeDef htim3; // Manejador del Timer 3 (Eje Altitud)
 void SysTick_Handler(void) {
    HAL_IncTick();
 }
-/* ====================================================================
-* INTERRUPCIONES EXTERNAS (EXTI) - Botones de la Interfaz
-* ==================================================================== */
-/**
-* @brief Manejador de interrupciones para pines del 10 al 15.
-* Aquí caen los tres botones de control agrupados en el puerto B.
-*/
-void EXTI15_10_IRQHandler(void) {
-   // PB12: Botón SPEED
-   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_12);
-   // PB13: Botón SYNC
-   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_13);
-   // PB14: Botón SELECT (Hundir el Encoder)
-   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_14);
-}
+
 /* ====================================================================
 * INTERRUPCIONES DE ACCESO DIRECTO A MEMORIA (DMA)
 * ==================================================================== */
@@ -104,7 +92,10 @@ void TIM3_IRQHandler(void)
    HAL_TIM_IRQHandler(&htim3);
 }
 
-
+void USART2_IRQHandler(void)
+{
+  HAL_UART_IRQHandler(&huart2);
+}
 
 
 

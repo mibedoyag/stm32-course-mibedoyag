@@ -8,6 +8,7 @@
 #include "Proyecto/motores.h"
 #include "Proyecto/sensores.h"
 #include "Proyecto/astronomia.h"
+#include "Proyecto/comunicacion.h"
 #include "stm32f4xx_hal.h"
 
 
@@ -31,6 +32,9 @@ void Montura_Init(void) {
 
     // 4. Iniciar variables matemáticas (No depende del hardware)
     Astronomia_InitLogica();
+
+    // 5. Iniciar la comunicación serial que escuchará Stellarium por protocolo LX200
+    Comunicacion_InitLogica();
 }
 
 
@@ -47,6 +51,9 @@ void Montura_Loop(void) {
 
     // 3. Actualizar cálculos de motores (Tracking o GoTo)
     Motores_UpdateLogica();
+
+    // 4. Escucha al PC de fondo
+    Comunicacion_ProcesarComandos();
 }
 
 

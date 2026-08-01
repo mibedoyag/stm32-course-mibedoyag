@@ -1,13 +1,16 @@
-/*
- * comunicacion.h
- *
- *  Created on: Jul 4, 2026
- *      Author: mgz
+/**
+ * @file    : comunicacion.h
+ * @brief   : Interfaz UART2 para conexión con PC (Stellarium - Protocolo LX200)
  */
+#ifndef PROYECTO_COMUNICACION_H
+#define PROYECTO_COMUNICACION_H
 
-#ifndef PROYECTO_COMUNICACION_H_
-#define PROYECTO_COMUNICACION_H_
+#include "stm32f4xx_hal.h"
 
+// Inicia el hardware UART2 y habilita las interrupciones
+void Comunicacion_InitLogica(void);
 
+// Lógica que evalúa el buffer buscando comandos válidos de Stellarium
+void Comunicacion_ProcesarComandos(void);
 
-#endif /* PROYECTO_COMUNICACION_H_ */
+#endif // PROYECTO_COMUNICACION_H

@@ -542,22 +542,22 @@ void Interfaz_UpdateFSM(void) {
 		LCD_Print(0, 0, "Moviendo Tubo...");
 		LCD_Print(1, 0, "[SELECT = STOP]");
 
-		// 1. Condición de Parada de Emergencia (Usuario cancela)
+		// 1. Condición de Parada de Emergencia (Usuario cancela con SELECT)
 		if (btn_presionado) {
 			Motores_DetenerGoTo();
 			LCD_Clear();
 			LCD_Print(0, 0, "Viaje Cancelado ");
 			HAL_Delay(1500);
-			currentState = STATE_OFFLINE_CATALOGO;
+			currentState = STATE_ONLINE; // Regresa al modo Online
 			menu_index = 0;
 			LCD_Clear();
 		}
-		// 2. Condición de Éxito (Las banderas de interrupción avisan que llegaron a 0)
+		// 2. Condición de Éxito (Los motores llegaron a las coordenadas)
 		else if (flag_goto_terminado_az && flag_goto_terminado_alt) {
 			LCD_Clear();
 			LCD_Print(0, 0, "Objetivo en Mira");
 			HAL_Delay(1500);
-			currentState = STATE_OFFLINE_CATALOGO;
+			currentState = STATE_ONLINE; // Regresa al modo Online
 			menu_index = 0;
 			LCD_Clear();
 		}
