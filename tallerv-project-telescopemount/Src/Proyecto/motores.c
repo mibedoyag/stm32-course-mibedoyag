@@ -10,6 +10,7 @@
 #include "stm32f4xx_hal.h"
 #include "Proyecto/sensores.h"
 #include <math.h>
+#include <stdlib.h>
 
 /* Instancias globales de los periféricos.
  * El control absoluto del hardware recae en este módulo, no en el autogenerador del IDE.
@@ -38,6 +39,11 @@ static uint16_t joy_centro_y = 2048;
 #define LIMIT_ALT_PORT GPIOB
 #define LIMIT_ALT_PIN  GPIO_PIN_2  // PB2 - Final de Carrera Altitud (Filtro RC -> GND)
 
+
+/* Acumuladores de error fraccional para no perder precisión por redondeo */
+static float error_acumulado_az = 0.0f;
+static float error_acumulado_alt = 0.0f;
+
 /* =========================================================================
  * VARIABLES DE LA SUB-MÁQUINA DE HOMING
  * ========================================================================= */
@@ -63,8 +69,8 @@ JoystickData_t joystick_actual;
 VelocidadModo_t velocidad_actual;
 
 /* Variables de estado interno para la cinemática */
-static float posicion_actual_az = 0.0f;  // Equivalente a 'preaz' del .ino
-static float posicion_actual_alt = 0.0f; // Equivalente a 'prealt' del .ino
+float posicion_actual_az = 0.0f;  // Equivalente a 'preaz' del .ino
+float posicion_actual_alt = 0.0f; // Equivalente a 'prealt' del .ino
 
 volatile uint32_t pasos_restantes_az = 0;
 volatile uint32_t pasos_restantes_alt = 0;
@@ -233,11 +239,11 @@ static void Motores_TIM_Init(void) {
  * @brief Lee los dos ejes del joystick.
  * Con el DMA activo, ya no hay tiempos de espera (Polling). Solo copiamos datos.
  */
-static void Motores_LeerJoystick(void) {
-    // El hardware escribe constantemente en adc_dma_buffer de fondo.
-    joystick_actual.eje_x = adc_dma_buffer[0];
-    joystick_actual.eje_y = adc_dma_buffer[1];
-}
+//static void Motores_LeerJoystick(void) {
+//    // El hardware escribe constantemente en adc_dma_buffer de fondo.
+//    joystick_actual.eje_x = adc_dma_buffer[0];
+//    joystick_actual.eje_y = adc_dma_buffer[1];
+//}
 
 /* =========================================================================
  * 3. LÓGICA DEL MÓDULO (API PÚBLICA)
@@ -315,18 +321,16 @@ void Motores_UpdateLogica(void) {
     static SystemState_t estado_anterior = STATE_BOOTING;
 
     // 2. PROTECCIÓN DE MENÚS Y ESTADOS AUTOMÁTICOS
-    if (currentState != STATE_MANUAL) {
-        // SOLO apagamos los motores si en el ciclo anterior estábamos en modo manual.
-        // Esto evita apagar los motores mientras están viajando en modo GOTO (STATE_MOVIENDO).
-        if (estado_anterior == STATE_MANUAL) {
-            HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-            HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+    if (currentState != STATE_MANUAL && currentState != STATE_CALIBRACION_FINA) {
+            if (estado_anterior == STATE_MANUAL || estado_anterior == STATE_CALIBRACION_FINA) {
+                HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+                HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+            }
+            estado_anterior = currentState;
+            return;
         }
-        estado_anterior = currentState; // Actualizamos la memoria
-        return;
-    }
 
-    estado_anterior = currentState; // Actualizamos la memoria estando en manual
+        estado_anterior = currentState;
 
     // 3. LECTURA Y FILTRADO SUAVIZADO DEL JOYSTICK (Filtro Anti-Jitter)
     // Promediamos las lecturas instantáneas del DMA para evitar ruido eléctrico en los pines analógicos
@@ -589,6 +593,63 @@ void Motores_UpdateHoming(void) {
 	default:
 		break;
 	}
+}
+
+
+/**
+ * @brief Ejecuta el movimiento milimétrico compensando la rotación de la Tierra.
+ */
+void Motores_PasoSideral(float az_nuevo, float alt_nuevo) {
+    float delta_az = az_nuevo - posicion_actual_az;
+    float delta_alt = alt_nuevo - posicion_actual_alt;
+
+    // Ruta más corta para Azimut
+    if (delta_az > 180.0f) delta_az -= 360.0f;
+    if (delta_az < -180.0f) delta_az += 360.0f;
+
+    // Calcular micropasos teóricos (con decimales)
+    float pasos_teoricos_az = delta_az * PULSOS_POR_GRADO_AZIMUT;
+    float pasos_teoricos_alt = delta_alt * PULSOS_POR_GRADO_ALTITUD;
+
+    // Sumar al acumulador histórico
+    error_acumulado_az += pasos_teoricos_az;
+    error_acumulado_alt += pasos_teoricos_alt;
+
+    // Extraer la parte entera que SÍ se puede mover físicamente
+    int32_t pasos_a_dar_az = (int32_t)error_acumulado_az;
+    int32_t pasos_a_dar_alt = (int32_t)error_acumulado_alt;
+
+    // Restar del acumulador los pasos que vamos a dar, conservando los decimales puros
+    error_acumulado_az -= (float)pasos_a_dar_az;
+    error_acumulado_alt -= (float)pasos_a_dar_alt;
+
+    // Setear Direcciones
+    if (pasos_a_dar_az > 0) HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
+    else if (pasos_a_dar_az < 0) HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
+
+    if (pasos_a_dar_alt > 0) HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
+    else if (pasos_a_dar_alt < 0) HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
+
+    // Sincronizar memoria del telescopio
+    posicion_actual_az = az_nuevo;
+    posicion_actual_alt = alt_nuevo;
+
+    // Forzar la velocidad súper lenta para que el motor no vibre (Tracking)
+    Motores_SetVelocidadGlobal(SPEED_GUIAR);
+
+    // Inyectar los pulsos a las variables volátiles de la interrupción IT
+    pasos_restantes_az += labs(pasos_a_dar_az);
+    pasos_restantes_alt += labs(pasos_a_dar_alt);
+
+    // Disparar Timers sin bloquear el microcontrolador
+    if (pasos_restantes_az > 0) {
+        flag_goto_terminado_az = 0;
+        HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
+    }
+    if (pasos_restantes_alt > 0) {
+        flag_goto_terminado_alt = 0;
+        HAL_TIM_PWM_Start_IT(&htim3, TIM_CHANNEL_1);
+    }
 }
 
 /* =========================================================================

@@ -20,6 +20,8 @@ typedef enum {
     STATE_OFFLINE_OBJETO,      // Selección de Objeto celeste
     STATE_OFFLINE_ACCION,      // Selección de acción (Apuntar/Seguir)
 	STATE_MOVIENDO,
+	STATE_CALIBRACION_FINA,
+	STATE_POST_SYNC,
     STATE_TRACKING,            // Modo de seguimiento activo
     STATE_ONLINE,              // Comunicación UART con Stellarium/SkySafari
     STATE_INFO,                // Pantalla de información (GPS + Euler)

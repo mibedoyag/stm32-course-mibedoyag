@@ -10,8 +10,8 @@
 #include <stdint.h>
 
 /* Constantes mecánicas calculadas para correas 3GT y motor 1.8° con 16 micro-pasos */
-#define PULSOS_POR_GRADO_AZIMUT  49.38f  // Relación 100/18
-#define PULSOS_POR_GRADO_ALTITUD 98.76f  // Relación (50/18) * (100/25)
+#define PULSOS_POR_GRADO_AZIMUT  49.3827f  // Relación 100/18
+#define PULSOS_POR_GRADO_ALTITUD 98.7654f  // Relación (50/18) * (100/25)
 
 /* Umbral de zona muerta para el joystick analógico (0 - 4095 en STM32 de 12 bits, centro en ~2048) */
 #define JOYSTICK_DEADZONE 200
@@ -49,6 +49,8 @@ extern volatile uint8_t flag_goto_terminado_alt;
 // API de Posicionamiento
 void Motores_Apuntar(float azimut_target, float altitud_target);
 void Motores_DetenerGoTo(void);
+
+void Motores_PasoSideral(float az_nuevo, float alt_nuevo);
 
 /* =========================================================================
  * RUTINA DE CALIBRACIÓN INICIAL (HOMING)

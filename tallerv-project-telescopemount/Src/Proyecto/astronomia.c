@@ -135,22 +135,68 @@ void Astronomia_CalcularAltAz(void) {
 
 /**
  * @brief Función para el botón SYNC.
- * Calcula la diferencia (error) entre dónde cree la matemática que está el tubo
- * y dónde están reportando los encoders físicos que realmente está.
- * @param encoder_alt_actual Lectura en grados del encoder de Altitud.
- * @param encoder_az_actual Lectura en grados del encoder de Azimut.
+ * Calcula el offset absoluto entre la posición teórica del objeto actual
+ * y la posición real medida por la IMU tras el centrado manual en el ocular.
+ * @param imu_alt_actual Lectura real en grados del eje de Altitud (IMU Y).
+ * @param imu_az_actual Lectura real en grados del eje de Azimut (IMU Z).
  */
-void Astronomia_SyncOffset(float encoder_alt_actual, float encoder_az_actual) {
-    // Si el usuario centra el objeto, el encoder físico dice la verdad.
-    // Restamos el valor temporal de la altitud calculada para sacar la diferencia geométrica.
+void Astronomia_SyncOffset(float imu_alt_actual, float imu_az_actual) {
+    /* 1. Recalculamos la altitud y azimut teóricas puras del objeto actual */
+    float d = 367.0f * gps_actual.anio - floorf((7.0f * (gps_actual.anio + floorf((gps_actual.mes + 9.0f) / 12.0f))) / 4.0f)
+              + floorf((275.0f * gps_actual.mes) / 9.0f) + gps_actual.dia - 730530.0f;
+    d = d + (gps_actual.ut_horas / 24.0f);
 
-    // Calculamos temporalmente la altitud/azimut puros (sin el offset previo)
-    float altitud_pura = target_actual.altitud - offset_calibracion.altitud;
-    float azimut_puro = target_actual.azimut - offset_calibracion.azimut;
+    float lst_grados = 280.46061837f + 360.98564736629f * d + gps_actual.longitud;
+    lst_grados = fmodf(lst_grados, 360.0f);
+    if (lst_grados < 0.0f) lst_grados += 360.0f;
 
-    // El nuevo offset es la diferencia entre el encoder real y la matemática pura
-    offset_calibracion.altitud = encoder_alt_actual - altitud_pura;
-    offset_calibracion.azimut = encoder_az_actual - azimut_puro;
+    float ra_grados = target_actual.ra * 15.0f;
+    float ha_grados = lst_grados - ra_grados;
 
-    // Al ejecutar nuevamente CalcularAltAz(), el objeto quedará perfectamente centrado.
+    float ha_rad = ha_grados * DEG2RAD_F;
+    float dec_rad = target_actual.dec * DEG2RAD_F;
+    float lat_rad = gps_actual.latitud * DEG2RAD_F;
+
+    float sin_alt = (sinf(dec_rad) * sinf(lat_rad)) + (cosf(dec_rad) * cosf(lat_rad) * cosf(ha_rad));
+    float alt_pura_deg = asinf(sin_alt) * RAD2DEG_F;
+
+    float cos_az = (sinf(dec_rad) - (sinf(asinf(sin_alt)) * sinf(lat_rad))) / (cosf(asinf(sin_alt)) * cosf(lat_rad));
+    if (cos_az > 1.0f) cos_az = 1.0f;
+    if (cos_az < -1.0f) cos_az = -1.0f;
+    float az_rad = acosf(cos_az);
+    if (sinf(ha_rad) > 0.0f) az_rad = (2.0f * PI_F) - az_rad;
+    float az_pura_deg = az_rad * RAD2DEG_F;
+
+    /* 2. Cálculo de los offsets de calibración */
+    offset_calibracion.altitud = imu_alt_actual - alt_pura_deg;
+
+    float diff_az = imu_az_actual - az_pura_deg;
+    if (diff_az > 180.0f)  diff_az -= 360.0f;
+    if (diff_az < -180.0f) diff_az += 360.0f;
+    offset_calibracion.azimut = diff_az;
+
+    /* 3. CLAVE: Actualizamos también la memoria física interna del módulo motores
+       para que sepa que estamos exactamente en la posición real de la IMU */
+    extern float posicion_actual_az;
+    extern float posicion_actual_alt;
+    posicion_actual_az = imu_az_actual;
+    posicion_actual_alt = imu_alt_actual;
+
+    /* 4. Recalcular Alt/Az globales */
+    Astronomia_CalcularAltAz();
+}
+
+/**
+ * @brief Avanza el reloj astronómico en modo offline para el seguimiento sideral.
+ * @param delta_ms Milisegundos transcurridos desde la última llamada
+ */
+void Astronomia_AvanzarTiempo(uint32_t delta_ms) {
+    // Convertir milisegundos a horas decimales y sumarlas a la hora UT actual
+    float delta_horas = (float)delta_ms / 3600000.0f;
+    gps_actual.ut_horas += delta_horas;
+
+    // Si pasamos de medianoche, ajustar (versión simplificada sin cambio de fecha)
+    if (gps_actual.ut_horas >= 24.0f) {
+        gps_actual.ut_horas -= 24.0f;
+    }
 }

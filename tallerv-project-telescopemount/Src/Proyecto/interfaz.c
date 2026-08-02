@@ -496,113 +496,202 @@ void Interfaz_UpdateFSM(void) {
 	}
 
 	case STATE_OFFLINE_ACCION: {
-		const char *opciones_acc[] = { "Apuntar", "Iniciar Track", "< Volver" };
-		Procesar_Navegacion_Encoder(3);
-		LCD_MostrarMenu(opciones_acc, 3, menu_index);
+			const char *opciones_acc[] = { "Apuntar", "Iniciar Track", "< Volver" };
+			Procesar_Navegacion_Encoder(3);
+			LCD_MostrarMenu(opciones_acc, 3, menu_index);
 
-		if (btn_presionado) {
-			LCD_Clear();
-			if (menu_index == 2) {
-				currentState = STATE_OFFLINE_OBJETO;
-				menu_index = objeto_seleccionado;
-			} else {
-				const ObjetoCeleste_t *obj = Astronomia_ObtenerObjeto(
-						catalogo_seleccionado, objeto_seleccionado);
-				target_actual.ra = obj->ra;
-				target_actual.dec = obj->dec;
+			if (btn_presionado) {
+				LCD_Clear();
+				if (menu_index == 2) {
+					currentState = STATE_OFFLINE_OBJETO;
+					menu_index = objeto_seleccionado;
+				} else {
+					const ObjetoCeleste_t *obj = Astronomia_ObtenerObjeto(
+							catalogo_seleccionado, objeto_seleccionado);
+					target_actual.ra = obj->ra;
+					target_actual.dec = obj->dec;
 
-				Astronomia_CalcularAltAz();
+					Astronomia_CalcularAltAz();
 
-				if (menu_index == 0) { // Opcion: Apuntar
-					// Mostramos el objetivo en pantalla durante un segundo
-					LCD_Print(0, 0, "Calculando...   ");
-					sprintf(buffer2, "Z:%.0f Y:%.0f     ", target_actual.azimut,
-							target_actual.altitud);
-					LCD_Print(1, 0, buffer2);
-					HAL_Delay(1000);
-					LCD_Clear();
+					if (menu_index == 0) { // Opcion: Apuntar (GoTo)
+						LCD_Print(0, 0, "Calculando...   ");
+						sprintf(buffer2, "Z:%.0f Y:%.0f     ", target_actual.azimut,
+								target_actual.altitud);
+						LCD_Print(1, 0, buffer2);
+						HAL_Delay(1000);
+						LCD_Clear();
 
-					// ¡Disparamos los motores asíncronamente!
-					Motores_Apuntar(target_actual.azimut,
-							target_actual.altitud);
-
-					// Transición al estado de viaje
-					currentState = STATE_MOVIENDO;
-				} else if (menu_index == 1) {
-					currentState = STATE_TRACKING;
+						Motores_Apuntar(target_actual.azimut, target_actual.altitud);
+						currentState = STATE_MOVIENDO;
+					} else if (menu_index == 1) { // Opcion: Iniciar Track directo
+						currentState = STATE_TRACKING;
+					}
 				}
 			}
+			break;
 		}
-		break;
-	}
+
+	/* --------------------------------------------------
+		 * 1. LLEGADA DEL GOTO (STATE_MOVIENDO)
+		 * -------------------------------------------------- */
+		case STATE_MOVIENDO:
+			LCD_Print(0, 0, "Moviendo Tubo...");
+			LCD_Print(1, 0, "[SELECT = STOP]");
+
+			if (btn_presionado) {
+				Motores_DetenerGoTo();
+				LCD_Clear();
+				LCD_Print(0, 0, "Viaje Cancelado ");
+				HAL_Delay(1500);
+				currentState = STATE_MAIN_MENU;
+				menu_index = 0;
+				LCD_Clear();
+			}
+			else if (flag_goto_terminado_az && flag_goto_terminado_alt) {
+				LCD_Clear();
+				LCD_Print(0, 0, "Llegada Exitosa!");
+				HAL_Delay(1000);
+				LCD_Clear();
+
+				// Al llegar, entramos a la fase de encuadre y sincronización
+				currentState = STATE_CALIBRACION_FINA;
+				menu_index = 0;
+			}
+			break;
 
 		/* --------------------------------------------------
-		 * ESTADO DE VIAJE AUTOMÁTICO (GoTo No Bloqueante)
+		 * 2. CALIBRACIÓN FINA (Joystick + Speed + Botón SYNC)
 		 * -------------------------------------------------- */
-	case STATE_MOVIENDO:
-		LCD_Print(0, 0, "Moviendo Tubo...");
-		LCD_Print(1, 0, "[SELECT = STOP]");
+		case STATE_CALIBRACION_FINA: {
+			// Permitir cambiar velocidad con el botón SPEED
+			if (btn_speed_pres) {
+				VelocidadModo_t nueva_vel;
+				if (velocidad_actual == SPEED_GUIAR) nueva_vel = SPEED_CENTRAR;
+				else if (velocidad_actual == SPEED_CENTRAR) nueva_vel = SPEED_BUSCAR;
+				else nueva_vel = SPEED_GUIAR;
 
-		// 1. Condición de Parada de Emergencia (Usuario cancela con SELECT)
-		if (btn_presionado) {
-			Motores_DetenerGoTo();
-			LCD_Clear();
-			LCD_Print(0, 0, "Viaje Cancelado ");
-			HAL_Delay(1500);
-			currentState = STATE_ONLINE; // Regresa al modo Online
-			menu_index = 0;
-			LCD_Clear();
-		}
-		// 2. Condición de Éxito (Los motores llegaron a las coordenadas)
-		else if (flag_goto_terminado_az && flag_goto_terminado_alt) {
-			LCD_Clear();
-			LCD_Print(0, 0, "Objetivo en Mira");
-			HAL_Delay(1500);
-			currentState = STATE_ONLINE; // Regresa al modo Online
-			menu_index = 0;
-			LCD_Clear();
-		}
-		break;
-	case STATE_TRACKING:
-			LCD_Print(0, 0, ">> TRACKING <<  ");
-			sprintf(buffer2, "Z:%4.0f Y:%4.0f", imu_actual.orientacion_z,
-					imu_actual.inclinacion_y);
+				Motores_SetVelocidadGlobal(nueva_vel);
+			}
+
+			const char *str_vel;
+			if (velocidad_actual == SPEED_GUIAR) str_vel = "GUIAR";
+			else if (velocidad_actual == SPEED_CENTRAR) str_vel = "CENTR";
+			else str_vel = "BUSCA";
+
+			// Mostrar interfaz de sincronización
+			LCD_Print(0, 0, "Centre & [SYNC] ");
+			sprintf(buffer2, "V:%s [SYNC=OK] ", str_vel);
 			LCD_Print(1, 0, buffer2);
 
-			// Si el usuario centra la estrella con el joystick y presiona SYNC (PB13):
+			// Si el usuario centra con el joystick y oprime el botón SYNC (PB13)
 			if (btn_sync_pres) {
-				// Sincronizamos usando la posición actual de los motores/IMU
 				Astronomia_SyncOffset(imu_actual.inclinacion_y, imu_actual.orientacion_z);
 
 				LCD_Clear();
-				LCD_Print(0, 0, "Estrella Sync OK!");
-				HAL_Delay(1500);
+				LCD_Print(0, 0, "Sincronizado OK!");
+				HAL_Delay(1200);
 				LCD_Clear();
+
+				// Tras sincronizar con éxito, pasamos al menú de decisión de tracking
+				currentState = STATE_POST_SYNC;
+				menu_index = 0;
 			}
 
+			// Si presiona SELECT sin hacer sync, pasa directo al menú post-sync o menú principal
 			if (btn_presionado) {
-				currentState = STATE_OFFLINE_CATALOGO;
+				currentState = STATE_POST_SYNC;
 				menu_index = 0;
 				LCD_Clear();
 			}
 			break;
+		}
+
+		/* --------------------------------------------------
+		 * 3. MENÚ DE DECISIÓN POST-SYNC (STATE_POST_SYNC)
+		 * -------------------------------------------------- */
+		case STATE_POST_SYNC: {
+			const char *opciones_post[] = { "Iniciar Tracking", "< Volver" };
+			Procesar_Navegacion_Encoder(2);
+			LCD_MostrarMenu(opciones_post, 2, menu_index);
+
+			if (btn_presionado) {
+				LCD_Clear();
+				if (menu_index == 0) {
+					currentState = STATE_TRACKING;
+					LCD_Clear();
+				} else {
+					currentState = STATE_MAIN_MENU;
+					menu_index = 0;
+					LCD_Clear();
+				}
+			}
+			break;
+		}
+
+		/* --------------------------------------------------
+		 * 4. TRACKING ACTIVO (STATE_TRACKING_ACTIVO)
+		 * -------------------------------------------------- */
+	case STATE_TRACKING: {
+		// Mostrar coordenadas y estado en vivo
+		LCD_Print(0, 0, ">> TRACKING <<  ");
+		sprintf(buffer2, "Z:%4.0f Y:%4.0f", imu_actual.orientacion_z,
+				imu_actual.inclinacion_y);
+		LCD_Print(1, 0, buffer2);
+
+		// Ejecutar la rutina de seguimiento 1 vez por segundo (sin bloquear la CPU)
+		static uint32_t ultimo_tick_tracking = 0;
+		uint32_t tick_actual = HAL_GetTick();
+		uint32_t delta_t = tick_actual - ultimo_tick_tracking;
+
+		// Refresco cada 1000 ms (1 segundo)
+		if (delta_t >= 1000) {
+			ultimo_tick_tracking = tick_actual;
+
+			// 1. Avanzar la simulación del reloj interno de la Tierra
+			Astronomia_AvanzarTiempo(delta_t);
+
+			// 2. Recalcular matemáticamente las coordenadas teóricas actualizadas
+			Astronomia_CalcularAltAz();
+
+			// 3. Inyectar la diferencia en los motores (El telescopio se mueve suavemente)
+			Motores_PasoSideral(target_actual.azimut, target_actual.altitud);
+		}
+
+		// Si el usuario cancela con SELECT
+		if (btn_presionado) {
+			// Limpiar acumuladores y regresar
+			Motores_DetenerGoTo();
+			currentState = STATE_MAIN_MENU;
+			menu_index = 0;
+			LCD_Clear();
+		}
+		break;
+	}
 		/* --------------------------------------------------
 		 * MODO 3: ONLINE (Serial)
 		 * -------------------------------------------------- */
-	case STATE_ONLINE: {
-	        char buf_debug[17];
-	        //sprintf(buf_debug, "Bytes RX: %lu", debug_rx_bytes);
+		case STATE_ONLINE: {
+			    char buf_debug[17];
+			    LCD_Print(0, 0, "LINK: STELLARIUM");
+			    LCD_Print(1, 0, "Sync:[SYNC Btn] ");
 
-	        LCD_Print(0, 0, "LINK: STELLARIUM");
-	        LCD_Print(1, 0, buf_debug); // Pantalla mostrará: "Bytes RX: 0"
+			    // Si el usuario centra la estrella manualmente tras el GoTo de Stellarium y oprime SYNC
+			    if (btn_sync_pres) {
+			        Astronomia_SyncOffset(imu_actual.inclinacion_y, imu_actual.orientacion_z);
 
-	        if (btn_presionado) {
-	            currentState = STATE_MAIN_MENU;
-	            menu_index = 2;
-	            LCD_Clear();
-	        }
-	        break;
-	    }
+			        LCD_Clear();
+			        LCD_Print(0, 0, "Sync Online OK!");
+			        HAL_Delay(1200);
+			        LCD_Clear();
+			    }
+
+			    if (btn_presionado) {
+			        currentState = STATE_MAIN_MENU;
+			        menu_index = 2;
+			        LCD_Clear();
+			    }
+			    break;
+			}
 
 		/* --------------------------------------------------
 		 * INFO EXTRA (Coordenadas y Euler)
