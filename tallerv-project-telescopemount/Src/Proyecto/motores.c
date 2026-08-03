@@ -390,7 +390,7 @@ void Motores_UpdateLogica(void) {
 	static uint8_t az_estado = 0;
 	static uint8_t alt_estado = 0;
 
-	// ------------------ PARCHE DE SINCRONIZACIÓN FÍSICA (DELTA IMU) ------------------
+	// ------------------ PARCHE DE SINCRONIZACIÓN FÍSICA (DELTA IMU INVERTIDO) ------------------
 	static uint8_t joystick_en_uso = 0;
 	static float imu_az_inicio_joy = 0.0f;
 	static float imu_alt_inicio_joy = 0.0f;
@@ -406,24 +406,33 @@ void Motores_UpdateLogica(void) {
 			pos_alt_inicio_joy = posicion_actual_alt;
 		} else {
 			if (rampa_az.activo) {
-				float delta_az_imu = imu_actual.orientacion_z - imu_az_inicio_joy;
-				if (delta_az_imu > 180.0f) delta_az_imu -= 360.0f;
-				if (delta_az_imu < -180.0f) delta_az_imu += 360.0f;
+				// Invertimos la polaridad del delta de IMU para alinearla con los motores
+				float delta_az_imu = imu_az_inicio_joy
+						- imu_actual.orientacion_z;
+				if (delta_az_imu > 180.0f)
+					delta_az_imu -= 360.0f;
+				if (delta_az_imu < -180.0f)
+					delta_az_imu += 360.0f;
 
 				float nueva_pos_az = pos_az_inicio_joy + delta_az_imu;
-				if (nueva_pos_az >= 360.0f) nueva_pos_az -= 360.0f;
-				if (nueva_pos_az < 0.0f) nueva_pos_az += 360.0f;
+				if (nueva_pos_az >= 360.0f)
+					nueva_pos_az -= 360.0f;
+				if (nueva_pos_az < 0.0f)
+					nueva_pos_az += 360.0f;
 
 				posicion_actual_az = nueva_pos_az;
 			}
 
 			if (rampa_alt.activo) {
-				float delta_alt_imu = imu_actual.inclinacion_y - imu_alt_inicio_joy;
+				// Invertimos la polaridad del delta en Altitud
+				float delta_alt_imu = imu_alt_inicio_joy
+						- imu_actual.inclinacion_y;
 				posicion_actual_alt = pos_alt_inicio_joy + delta_alt_imu;
 			}
 		}
 	} else {
 		joystick_en_uso = 0;
+
 	}
 	// ---------------------------------------------------------------------------------
 
@@ -506,11 +515,12 @@ void Motores_Apuntar(float azimut_target, float altitud_target) {
     if (delta_az > 180.0f)  delta_az -= 360.0f;
     if (delta_az < -180.0f) delta_az += 360.0f;
 
-    if (delta_az >= 0) HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
-    else HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
+    /* INVERSIÓN EXCLUSIVA PARA GOTO (ONLINE / OFFLINE) */
+    if (delta_az >= 0) HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
+    else HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
 
-    if (delta_alt >= 0) HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
-    else HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
+    if (delta_alt >= 0) HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
+    else HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
 
     pasos_restantes_az = (uint32_t)(fabsf(delta_az) * PULSOS_POR_GRADO_AZIMUT);
     pasos_restantes_alt = (uint32_t)(fabsf(delta_alt) * PULSOS_POR_GRADO_ALTITUD);
@@ -568,6 +578,9 @@ void Motores_IniciarHoming(void) {
 	HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
 }
 
+/**
+ * @brief Sub-máquina de estados no bloqueante para el Homing Híbrido.
+ */
 void Motores_UpdateHoming(void) {
 	if (estado_homing == HOME_IDLE || estado_homing == HOME_DONE)
 		return;
@@ -576,6 +589,7 @@ void Motores_UpdateHoming(void) {
 
 	switch (estado_homing) {
 
+	/* --- SECUENCIA EJE ALTITUD (Interruptor Físico) --- */
 	case HOME_ALT_FAST:
 		if (limit_alt == GPIO_PIN_RESET && (HAL_GetTick() - temporizador_homing > 200)) {
 			HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
@@ -603,34 +617,69 @@ void Motores_UpdateHoming(void) {
 	case HOME_ALT_SLOW:
 		if (limit_alt == GPIO_PIN_RESET && (HAL_GetTick() - temporizador_homing > 200)) {
 			HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-			HAL_Delay(300);
+			HAL_Delay(300); // Estabilización mecánica
 
 			posicion_actual_alt = imu_actual.inclinacion_y;
 			estado_homing = HOME_ALIGN_IMU;
 		}
 		break;
 
+	/* --- ALINEACIÓN POST FINALES DE CARRERA HACIA EL CERO ABSOLUTO --- */
 	case HOME_ALIGN_IMU: {
-	            uint32_t tiempo_transcurrido = HAL_GetTick() - tiempo_inicio_homing;
-	            uint8_t condicion_mag = (imu_actual.estado_calibracion == 3);
-	            uint8_t timeout_cumplido = (tiempo_transcurrido > 30000);
+		uint32_t tiempo_transcurrido = HAL_GetTick() - tiempo_inicio_homing;
+		uint8_t condicion_mag = (imu_actual.estado_calibracion == 3);
+		uint8_t timeout_cumplido = (tiempo_transcurrido > 30000); // 30s timeout
 
-	            if (condicion_mag || timeout_cumplido) {
+		if (condicion_mag || timeout_cumplido) {
+			if (condicion_mag) {
+				posicion_actual_az = imu_actual.orientacion_z;
+			} else {
+				posicion_actual_az = 0.0f;
+			}
+			posicion_actual_alt = imu_actual.inclinacion_y;
 
-	                if (condicion_mag) {
-	                    posicion_actual_az = imu_actual.orientacion_z;
-	                } else {
-	                    posicion_actual_az = 0.0f;
-	                }
-	                posicion_actual_alt = imu_actual.inclinacion_y;
+			estado_homing = HOME_WAIT_GOTO;
 
-	                estado_homing = HOME_WAIT_GOTO;
+			// 1. Ajustar velocidad
+			Motores_SetVelocidadGlobal(SPEED_CENTRAR);
 
-	                Motores_SetVelocidadGlobal(SPEED_CENTRAR);
-	                Motores_Apuntar(0.0f, 0.0f);
-	            }
-	            break;
-	        }
+			// 2. Calcular pasos absolutos necesarios para volver a (0.0, 0.0)
+			float delta_az = 0.0f - posicion_actual_az;
+			float delta_alt = 0.0f - posicion_actual_alt;
+
+			if (delta_az > 180.0f)  delta_az -= 360.0f;
+			if (delta_az < -180.0f) delta_az += 360.0f;
+
+			pasos_restantes_az = (uint32_t)(fabsf(delta_az) * PULSOS_POR_GRADO_AZIMUT);
+			pasos_restantes_alt = (uint32_t)(fabsf(delta_alt) * PULSOS_POR_GRADO_ALTITUD);
+
+			// 3. DIRECCIÓN DIRECTA DE HOMING (Fuerza al motor de Altitud a SUBIR alejándose del switch)
+			HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, (delta_az >= 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET); // GPIO_PIN_SET obliga a subir mecánicamente
+
+			// 4. Actualizar memoria de posición a 0.0f
+			posicion_actual_az = 0.0f;
+			posicion_actual_alt = 0.0f;
+
+			// 5. Arrancar temporizadores
+			if (pasos_restantes_az > 0) {
+				flag_goto_terminado_az = 0;
+				__HAL_TIM_SET_COUNTER(&htim2, 0);
+				HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
+			} else {
+				flag_goto_terminado_az = 1;
+			}
+
+			if (pasos_restantes_alt > 0) {
+				flag_goto_terminado_alt = 0;
+				__HAL_TIM_SET_COUNTER(&htim3, 0);
+				HAL_TIM_PWM_Start_IT(&htim3, TIM_CHANNEL_1);
+			} else {
+				flag_goto_terminado_alt = 1;
+			}
+		}
+		break;
+	}
 
 	case HOME_WAIT_GOTO:
 		if (flag_goto_terminado_az && flag_goto_terminado_alt) {
@@ -638,7 +687,7 @@ void Motores_UpdateHoming(void) {
 			posicion_actual_alt = 0.0f;
 
 			Motores_SetVelocidadGlobal(SPEED_BUSCAR);
-			flag_homing_ok = 1;
+			flag_homing_ok = 1; // Liberar menú principal
 			estado_homing = HOME_DONE;
 		}
 		break;
@@ -673,11 +722,12 @@ void Motores_PasoSideral(float az_nuevo, float alt_nuevo) {
     error_acumulado_az -= (float)pasos_a_dar_az;
     error_acumulado_alt -= (float)pasos_a_dar_alt;
 
-    if (pasos_a_dar_az > 0) HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
-    else if (pasos_a_dar_az < 0) HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
+    /* INVERSIÓN EXCLUSIVA PARA TRACKING SIDERAL */
+    if (pasos_a_dar_az > 0) HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
+    else if (pasos_a_dar_az < 0) HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
 
-    if (pasos_a_dar_alt > 0) HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
-    else if (pasos_a_dar_alt < 0) HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
+    if (pasos_a_dar_alt > 0) HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
+    else if (pasos_a_dar_alt < 0) HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
 
     posicion_actual_az = az_nuevo;
     posicion_actual_alt = alt_nuevo;
