@@ -631,42 +631,42 @@ void Interfaz_UpdateFSM(void) {
 		/* --------------------------------------------------
 		 * 4. TRACKING ACTIVO (STATE_TRACKING_ACTIVO)
 		 * -------------------------------------------------- */
-	case STATE_TRACKING: {
-		// Mostrar coordenadas y estado en vivo
-		LCD_Print(0, 0, ">> TRACKING <<  ");
-		sprintf(buffer2, "Z:%4.0f Y:%4.0f", imu_actual.orientacion_z,
-				imu_actual.inclinacion_y);
-		LCD_Print(1, 0, buffer2);
+		case STATE_TRACKING: {
+				// Mostrar coordenadas y estado en vivo
+				LCD_Print(0, 0, ">> TRACKING <<  ");
+				sprintf(buffer2, "Z:%4.0f Y:%4.0f", imu_actual.orientacion_z, imu_actual.inclinacion_y);
+				LCD_Print(1, 0, buffer2);
 
-		// Ejecutar la rutina de seguimiento 1 vez por segundo (sin bloquear la CPU)
-		static uint32_t ultimo_tick_tracking = 0;
-		uint32_t tick_actual = HAL_GetTick();
-		uint32_t delta_t = tick_actual - ultimo_tick_tracking;
+				static uint32_t ultimo_tick_tracking = 0;
+				static uint8_t tracking_inicializado = 0; // FIX: Bandera de inicio limpio
+				uint32_t tick_actual = HAL_GetTick();
 
-		// Refresco cada 1000 ms (1 segundo)
-		if (delta_t >= 1000) {
-			ultimo_tick_tracking = tick_actual;
+				// Sincronizamos el reloj del sistema en el instante exacto en que entramos a este menú
+				if (!tracking_inicializado) {
+					ultimo_tick_tracking = tick_actual;
+					tracking_inicializado = 1;
+				}
 
-			// 1. Avanzar la simulación del reloj interno de la Tierra
-			Astronomia_AvanzarTiempo(delta_t);
+				uint32_t delta_t = tick_actual - ultimo_tick_tracking;
 
-			// 2. Recalcular matemáticamente las coordenadas teóricas actualizadas
-			Astronomia_CalcularAltAz();
+				// Refresco cada 1000 ms (1 segundo)
+				if (delta_t >= 1000) {
+					ultimo_tick_tracking = tick_actual;
+					Astronomia_AvanzarTiempo(delta_t);
+					Astronomia_CalcularAltAz();
+					Motores_PasoSideral(target_actual.azimut, target_actual.altitud);
+				}
 
-			// 3. Inyectar la diferencia en los motores (El telescopio se mueve suavemente)
-			Motores_PasoSideral(target_actual.azimut, target_actual.altitud);
-		}
-
-		// Si el usuario cancela con SELECT
-		if (btn_presionado) {
-			// Limpiar acumuladores y regresar
-			Motores_DetenerGoTo();
-			currentState = STATE_MAIN_MENU;
-			menu_index = 0;
-			LCD_Clear();
-		}
-		break;
-	}
+				// Si el usuario cancela con SELECT
+				if (btn_presionado) {
+					Motores_DetenerGoTo();
+					tracking_inicializado = 0; // Reseteamos la bandera para el futuro
+					currentState = STATE_MAIN_MENU;
+					menu_index = 0;
+					LCD_Clear();
+				}
+				break;
+			}
 		/* --------------------------------------------------
 		 * MODO 3: ONLINE (Serial)
 		 * -------------------------------------------------- */
@@ -756,4 +756,3 @@ void Interfaz_UpdateFSM(void) {
 		break;
 	}
 }
-

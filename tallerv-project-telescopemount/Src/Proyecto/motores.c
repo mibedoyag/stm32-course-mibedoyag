@@ -84,6 +84,25 @@ uint32_t arr_centrar = 3999;  // 250 Hz  (Joystick Normal)
 uint32_t arr_guiar   = 19999; // 50 Hz   (Ajuste Fino - Seguimiento Sideral)
 
 /* =========================================================================
+ * SISTEMA DE RAMPAS DE ACELERACIÓN (16 MHz BASE)
+ * ========================================================================= */
+typedef struct {
+    uint32_t freq_actual;    // Frecuencia instantánea (Hz)
+    uint32_t freq_objetivo;  // Destino (Hz)
+    uint32_t paso_acel;      // Agresividad (Hz por cada 5ms). 10 = Suave (0.5s en llegar a max)
+    uint8_t  activo;         // 1 = Motor en rampa, 0 = Libre
+} MotorRampa_t;
+
+volatile MotorRampa_t rampa_az =  {0, 0, 10, 0};
+volatile MotorRampa_t rampa_alt = {0, 0, 10, 0};
+
+// Frecuencias traducidas de tus ARR originales a 16MHz (Prescaler 16)
+#define FREQ_BUSCAR   1000 // Equivale a ARR 999
+#define FREQ_CENTRAR  250  // Equivale a ARR 3999
+#define FREQ_GUIAR    50   // Equivale a ARR 19999
+#define FREQ_MINIMA   50   // Velocidad de arranque/frenado seguro
+
+/* =========================================================================
  * 1. CONFIGURACIÓN DE HARDWARE
  * ========================================================================= */
 
@@ -232,20 +251,6 @@ static void Motores_TIM_Init(void) {
 }
 
 /* =========================================================================
- * 2. FUNCIONES PRIVADAS DE CONTROL
- * ========================================================================= */
-
-/**
- * @brief Lee los dos ejes del joystick.
- * Con el DMA activo, ya no hay tiempos de espera (Polling). Solo copiamos datos.
- */
-//static void Motores_LeerJoystick(void) {
-//    // El hardware escribe constantemente en adc_dma_buffer de fondo.
-//    joystick_actual.eje_x = adc_dma_buffer[0];
-//    joystick_actual.eje_y = adc_dma_buffer[1];
-//}
-
-/* =========================================================================
  * 3. LÓGICA DEL MÓDULO (API PÚBLICA)
  * ========================================================================= */
 
@@ -253,33 +258,25 @@ static void Motores_TIM_Init(void) {
  * @brief Inicializa el hardware y pone el sistema mecánico en un estado seguro.
  */
 void Motores_InitLogica(void) {
-    // 1. Iniciar hardware a bajo nivel
     Motores_GPIO_Init();
     Motores_ADC_Init();
     Motores_TIM_Init();
 
-    //Espera crítica: El BNO055 necesita 2 segundos para cargar su firmware de fusión
 	HAL_Delay(2000);
 
-    // 2. Inicialización segura del Joystick en la zona muerta
     joystick_actual.eje_x = 2048;
     joystick_actual.eje_y = 2048;
     velocidad_actual = SPEED_BUSCAR;
 
-    // 3. Asegurar que los motores arrancan totalmente apagados
     HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
     HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
 
-    // 4. Iniciar la recolección asíncrona de datos del Joystick vía DMA
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_dma_buffer, 2);
 
-    // NUEVO: Autocalibración del Joystick.
-	// Leemos dónde descansa físicamente el resorte y lo guardamos como el "Cero".
 	HAL_Delay(100);
 	joy_centro_x = adc_dma_buffer[0];
 	joy_centro_y = adc_dma_buffer[1];
 
-    // 5. Arrancar el proceso de calibración absoluta al finalizar la inicialización
     Motores_IniciarHoming();
 }
 
@@ -296,124 +293,205 @@ void Motores_SetVelocidadGlobal(VelocidadModo_t nueva_velocidad) {
         case SPEED_GUIAR:   nuevo_arr = arr_guiar;   break;
     }
 
-	// Actualizamos TIM2 y reiniciamos su contador a 0 para evitar el bloqueo de 32-bits
 	__HAL_TIM_SET_AUTORELOAD(&htim2, nuevo_arr);
 	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, nuevo_arr / 2);
 	__HAL_TIM_SET_COUNTER(&htim2, 0);
 
-	// Actualizamos TIM3 y reiniciamos su contador a 0
 	__HAL_TIM_SET_AUTORELOAD(&htim3, nuevo_arr);
 	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, nuevo_arr / 2);
 	__HAL_TIM_SET_COUNTER(&htim3, 0);
 }
 
 /**
+ * @brief Gestiona la aceleración suave de los motores.
+ */
+static void Motores_ProcesarRampas(void) {
+    static uint32_t ultimo_tick_rampa = 0;
+
+    if (HAL_GetTick() - ultimo_tick_rampa < 5) return;
+    ultimo_tick_rampa = HAL_GetTick();
+
+    MotorRampa_t *rampas[2] = { (MotorRampa_t*)&rampa_az, (MotorRampa_t*)&rampa_alt };
+    TIM_HandleTypeDef *timers[2] = { &htim2, &htim3 };
+    volatile uint32_t *pasos[2] = { &pasos_restantes_az, &pasos_restantes_alt };
+
+    for (int i = 0; i < 2; i++) {
+        if (rampas[i]->activo) {
+
+            if (*pasos[i] > 0 && *pasos[i] <= 150) {
+                rampas[i]->freq_objetivo = FREQ_MINIMA;
+            }
+
+            if (rampas[i]->freq_actual < rampas[i]->freq_objetivo) {
+                rampas[i]->freq_actual += rampas[i]->paso_acel;
+                if (rampas[i]->freq_actual > rampas[i]->freq_objetivo)
+                    rampas[i]->freq_actual = rampas[i]->freq_objetivo;
+            }
+            else if (rampas[i]->freq_actual > rampas[i]->freq_objetivo) {
+                if (rampas[i]->freq_actual > rampas[i]->paso_acel + FREQ_MINIMA)
+                    rampas[i]->freq_actual -= rampas[i]->paso_acel;
+                else
+                    rampas[i]->freq_actual = rampas[i]->freq_objetivo;
+            }
+
+			if (rampas[i]->freq_actual >= FREQ_MINIMA) {
+				uint32_t nuevo_arr = (1000000 / rampas[i]->freq_actual) - 1;
+				__HAL_TIM_SET_AUTORELOAD(timers[i], nuevo_arr);
+				__HAL_TIM_SET_COMPARE(timers[i], TIM_CHANNEL_1, nuevo_arr / 2);
+
+				if (__HAL_TIM_GET_COUNTER(timers[i]) > nuevo_arr) {
+					__HAL_TIM_SET_COUNTER(timers[i], 0);
+				}
+			}
+
+            if (rampas[i]->freq_actual <= FREQ_MINIMA && rampas[i]->freq_objetivo == 0 && *pasos[i] == 0) {
+                HAL_TIM_PWM_Stop(timers[i], TIM_CHANNEL_1);
+                rampas[i]->activo = 0;
+            }
+        }
+    }
+}
+
+/**
  * @brief Lógica de evaluación periódica del sistema de movimiento con suavizado ADC y velocidad global.
  */
 void Motores_UpdateLogica(void) {
-    // 1. PROTECCIÓN DE HOMING: Si el Homing está activo, delegar el control
-    if (estado_homing != HOME_DONE) {
-        Motores_UpdateHoming();
-        return;
-    }
+	if (estado_homing != HOME_DONE) {
+	        Motores_UpdateHoming();
+	        return;
+	    }
 
-    // --- EL FIX: Memoria del estado anterior ---
-    static SystemState_t estado_anterior = STATE_BOOTING;
+	Motores_ProcesarRampas();
 
-    // 2. PROTECCIÓN DE MENÚS Y ESTADOS AUTOMÁTICOS
-    if (currentState != STATE_MANUAL && currentState != STATE_CALIBRACION_FINA) {
-            if (estado_anterior == STATE_MANUAL || estado_anterior == STATE_CALIBRACION_FINA) {
-                HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-                HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-            }
-            estado_anterior = currentState;
-            return;
-        }
+	static SystemState_t estado_anterior = STATE_BOOTING;
 
-        estado_anterior = currentState;
+	if (currentState != STATE_MANUAL && currentState != STATE_CALIBRACION_FINA) {
+	    if (estado_anterior == STATE_MANUAL || estado_anterior == STATE_CALIBRACION_FINA) {
+	        HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+	        HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+	        rampa_az.activo = 0;
+	        rampa_alt.activo = 0;
+	    }
+	    estado_anterior = currentState;
+	    return;
+	}
 
-    // 3. LECTURA Y FILTRADO SUAVIZADO DEL JOYSTICK (Filtro Anti-Jitter)
-    // Promediamos las lecturas instantáneas del DMA para evitar ruido eléctrico en los pines analógicos
-    static uint16_t filtro_x = 2048;
-    static uint16_t filtro_y = 2048;
+	estado_anterior = currentState;
 
-    // Suavizado exponencial (90% valor anterior + 10% lectura nueva)
-    filtro_x = (uint16_t)(((uint32_t)filtro_x * 9 + adc_dma_buffer[0]) / 10);
-    filtro_y = (uint16_t)(((uint32_t)filtro_y * 9 + adc_dma_buffer[1]) / 10);
+	static uint16_t filtro_x = 2048;
+	static uint16_t filtro_y = 2048;
 
-    joystick_actual.eje_x = filtro_x;
-    joystick_actual.eje_y = filtro_y;
+	filtro_x = (uint16_t) (((uint32_t) filtro_x * 9 + adc_dma_buffer[0]) / 10);
+	filtro_y = (uint16_t) (((uint32_t) filtro_y * 9 + adc_dma_buffer[1]) / 10);
 
-    /*// 4. APLICAR LA VELOCIDAD GLOBAL ACTUALIZADA POR EL BOTÓN SPEED
-    // Asegura que el motor responda al perfil elegido (GUIAR, CENTRAR, BUSCAR)
-    uint32_t arr_activo = arr_buscar;
-    if (velocidad_actual == SPEED_GUIAR)      arr_activo = arr_guiar;
-    else if (velocidad_actual == SPEED_CENTRAR) arr_activo = arr_centrar;
-    else if (velocidad_actual == SPEED_BUSCAR)  arr_activo = arr_buscar;
+	joystick_actual.eje_x = filtro_x;
+	joystick_actual.eje_y = filtro_y;
 
-    // Actualizamos el Timer 2 (Azimut) con la velocidad seleccionada
-    __HAL_TIM_SET_AUTORELOAD(&htim2, arr_activo);
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, arr_activo / 2);
+	static uint8_t az_estado = 0;
+	static uint8_t alt_estado = 0;
 
-    // Actualizamos el Timer 3 (Altitud) con la velocidad seleccionada
-    __HAL_TIM_SET_AUTORELOAD(&htim3, arr_activo);
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, arr_activo / 2);*/
+	// ------------------ PARCHE DE SINCRONIZACIÓN FÍSICA (DELTA IMU) ------------------
+	static uint8_t joystick_en_uso = 0;
+	static float imu_az_inicio_joy = 0.0f;
+	static float imu_alt_inicio_joy = 0.0f;
+	static float pos_az_inicio_joy = 0.0f;
+	static float pos_alt_inicio_joy = 0.0f;
 
-    // Latches de estado para evitar llamadas redundantes a las funciones HAL
-    static uint8_t az_estado = 0;  // 0 = Detenido, 1 = Izq, 2 = Der
-    static uint8_t alt_estado = 0; // 0 = Detenido, 1 = Arr, 2 = Aba
+	if (rampa_az.activo || rampa_alt.activo) {
+		if (!joystick_en_uso) {
+			joystick_en_uso = 1;
+			imu_az_inicio_joy = imu_actual.orientacion_z;
+			imu_alt_inicio_joy = imu_actual.inclinacion_y;
+			pos_az_inicio_joy = posicion_actual_az;
+			pos_alt_inicio_joy = posicion_actual_alt;
+		} else {
+			if (rampa_az.activo) {
+				float delta_az_imu = imu_actual.orientacion_z - imu_az_inicio_joy;
+				if (delta_az_imu > 180.0f) delta_az_imu -= 360.0f;
+				if (delta_az_imu < -180.0f) delta_az_imu += 360.0f;
 
-    // ---------------------------------------------------------
-        // EVALUACIÓN EJE X (AZIMUT - TIM2)
-        // ---------------------------------------------------------
-        if (joystick_actual.eje_x < (joy_centro_x - JOYSTICK_DEADZONE)) {
-            if (az_estado != 1) { // Latch: Arranca una SOLA vez
-                HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-                HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
-                HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-                az_estado = 1;
-            }
-        }
-        else if (joystick_actual.eje_x > (joy_centro_x + JOYSTICK_DEADZONE)) {
-            if (az_estado != 2) {
-                HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-                HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
-                HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-                az_estado = 2;
-            }
-        }
-        else {
-            if (az_estado != 0) { // Frena una SOLA vez
-                HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-                az_estado = 0;
-            }
-        }
+				float nueva_pos_az = pos_az_inicio_joy + delta_az_imu;
+				if (nueva_pos_az >= 360.0f) nueva_pos_az -= 360.0f;
+				if (nueva_pos_az < 0.0f) nueva_pos_az += 360.0f;
 
-        // ---------------------------------------------------------
-        // EVALUACIÓN EJE Y (ALTITUD - TIM3)
-        // ---------------------------------------------------------
-        if (joystick_actual.eje_y < (joy_centro_y - JOYSTICK_DEADZONE)) {
-            if (alt_estado != 1) {
-                HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-                HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
-                HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
-                alt_estado = 1;
-            }
-        }
-        else if (joystick_actual.eje_y > (joy_centro_y + JOYSTICK_DEADZONE)) {
-            if (alt_estado != 2) {
-                HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-                HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
-                HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
-                alt_estado = 2;
-            }
-        }
-        else {
-            if (alt_estado != 0) {
-                HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-                alt_estado = 0;
-            }
-        }
+				posicion_actual_az = nueva_pos_az;
+			}
+
+			if (rampa_alt.activo) {
+				float delta_alt_imu = imu_actual.inclinacion_y - imu_alt_inicio_joy;
+				posicion_actual_alt = pos_alt_inicio_joy + delta_alt_imu;
+			}
+		}
+	} else {
+		joystick_en_uso = 0;
+	}
+	// ---------------------------------------------------------------------------------
+
+	uint32_t obj_freq = (velocidad_actual == SPEED_BUSCAR) ? FREQ_BUSCAR : ((velocidad_actual == SPEED_CENTRAR) ? FREQ_CENTRAR : FREQ_GUIAR);
+
+	// ---------------------------------------------------------
+	// EVALUACIÓN EJE X (AZIMUT - TIM2)
+	// ---------------------------------------------------------
+	if (joystick_actual.eje_x < (joy_centro_x - JOYSTICK_DEADZONE)) {
+		if (az_estado != 1) {
+			HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+			HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
+			rampa_az.freq_actual = FREQ_MINIMA;
+			rampa_az.activo = 1;
+			__HAL_TIM_SET_COUNTER(&htim2, 0);
+			HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+			az_estado = 1;
+		}
+		rampa_az.freq_objetivo = obj_freq;
+	} else if (joystick_actual.eje_x > (joy_centro_x + JOYSTICK_DEADZONE)) {
+		if (az_estado != 2) {
+			HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+			HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
+			rampa_az.freq_actual = FREQ_MINIMA;
+			rampa_az.activo = 1;
+			__HAL_TIM_SET_COUNTER(&htim2, 0);
+			HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+			az_estado = 2;
+		}
+		rampa_az.freq_objetivo = obj_freq;
+	} else {
+		if (az_estado != 0) {
+			rampa_az.freq_objetivo = 0;
+			az_estado = 0;
+		}
+	}
+
+	// ---------------------------------------------------------
+	// EVALUACIÓN EJE Y (ALTITUD - TIM3)
+	// ---------------------------------------------------------
+	if (joystick_actual.eje_y < (joy_centro_y - JOYSTICK_DEADZONE)) {
+		if (alt_estado != 1) {
+			HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+			HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
+			rampa_alt.freq_actual = FREQ_MINIMA;
+			rampa_alt.activo = 1;
+			__HAL_TIM_SET_COUNTER(&htim3, 0);
+			HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+			alt_estado = 1;
+		}
+		rampa_alt.freq_objetivo = obj_freq;
+	} else if (joystick_actual.eje_y > (joy_centro_y + JOYSTICK_DEADZONE)) {
+		if (alt_estado != 2) {
+			HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+			HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
+			rampa_alt.freq_actual = FREQ_MINIMA;
+			rampa_alt.activo = 1;
+			__HAL_TIM_SET_COUNTER(&htim3, 0);
+			HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+			alt_estado = 2;
+		}
+		rampa_alt.freq_objetivo = obj_freq;
+	} else {
+		if (alt_estado != 0) {
+			rampa_alt.freq_objetivo = 0;
+			alt_estado = 0;
+		}
+	}
 }
 
 /**
@@ -422,38 +500,39 @@ void Motores_UpdateLogica(void) {
  * @param altitud_target Ángulo objetivo en Altitud (-90 a 90)
  */
 void Motores_Apuntar(float azimut_target, float altitud_target) {
-
-    // 1. Calcular deltas (Diferencia de ángulos)
     float delta_az = azimut_target - posicion_actual_az;
     float delta_alt = altitud_target - posicion_actual_alt;
 
-    // 2. Optimización: Buscar el camino más corto en Azimut (Círculo de 360°)
     if (delta_az > 180.0f)  delta_az -= 360.0f;
     if (delta_az < -180.0f) delta_az += 360.0f;
 
-    // 3. Determinar dirección de los ejes (Set/Reset de los pines DIR)
     if (delta_az >= 0) HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
     else HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
 
     if (delta_alt >= 0) HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
     else HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
 
-    // 4. Convertir grados a número de pasos absolutos y cargar los contadores
     pasos_restantes_az = (uint32_t)(fabsf(delta_az) * PULSOS_POR_GRADO_AZIMUT);
     pasos_restantes_alt = (uint32_t)(fabsf(delta_alt) * PULSOS_POR_GRADO_ALTITUD);
 
-    // 5. Actualizar la memoria del telescopio para el próximo viaje
     posicion_actual_az = azimut_target;
     posicion_actual_alt = altitud_target;
 
-    // 6. Arrancar los Timers en modo INTERRUPCIÓN (No bloqueante)
     if (pasos_restantes_az > 0) {
-        flag_goto_terminado_az = 0; // Bajamos la bandera
+        flag_goto_terminado_az = 0;
+        rampa_az.freq_actual = FREQ_MINIMA;
+        rampa_az.freq_objetivo = FREQ_BUSCAR;
+        rampa_az.activo = 1;
+        __HAL_TIM_SET_COUNTER(&htim2, 0);
         HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
     }
 
     if (pasos_restantes_alt > 0) {
-        flag_goto_terminado_alt = 0; // Bajamos la bandera
+        flag_goto_terminado_alt = 0;
+        rampa_alt.freq_actual = FREQ_MINIMA;
+        rampa_alt.freq_objetivo = FREQ_BUSCAR;
+        rampa_alt.activo = 1;
+        __HAL_TIM_SET_COUNTER(&htim3, 0);
         HAL_TIM_PWM_Start_IT(&htim3, TIM_CHANNEL_1);
     }
 }
@@ -468,36 +547,27 @@ void Motores_DetenerGoTo(void) {
     pasos_restantes_alt = 0;
     flag_goto_terminado_az = 1;
     flag_goto_terminado_alt = 1;
+    rampa_az.activo = 0;
+    rampa_alt.activo = 0;
 }
 
-
-/* Variables globales para control de tiempo y estado del Homing */
 static uint32_t temporizador_homing = 0;
-static uint32_t tiempo_inicio_homing = 0; // Para el timeout de los 2 minutos de la brújula
+static uint32_t tiempo_inicio_homing = 0;
 
-/**
- * @brief Prepara las variables y arranca la calibración del eje Altitud.
- * El eje Azimut ya no usa interruptor físico.
- */
 void Motores_IniciarHoming(void) {
 	flag_homing_ok = 0;
-	estado_homing = HOME_ALT_FAST; // Arrancamos directo con la altura
+	estado_homing = HOME_ALT_FAST;
 	temporizador_homing = HAL_GetTick();
-	tiempo_inicio_homing = HAL_GetTick(); // Iniciamos conteo de los 2 minutos
+	tiempo_inicio_homing = HAL_GetTick();
 
-	// Apagamos azimut por completo
 	HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
 
-	// Arrancamos Altitud hacia el switch
 	HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
 	__HAL_TIM_SET_AUTORELOAD(&htim3, arr_centrar);
 	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, arr_centrar / 2);
 	HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
 }
 
-/**
- * @brief Sub-máquina de estados no bloqueante para el Homing Híbrido (Solo Altitud + Brújula Oportunista).
- */
 void Motores_UpdateHoming(void) {
 	if (estado_homing == HOME_IDLE || estado_homing == HOME_DONE)
 		return;
@@ -506,10 +576,8 @@ void Motores_UpdateHoming(void) {
 
 	switch (estado_homing) {
 
-	/* --- SECUENCIA EJE ALTITUD (Único switch físico) --- */
 	case HOME_ALT_FAST:
-		if (limit_alt == GPIO_PIN_RESET
-				&& (HAL_GetTick() - temporizador_homing > 200)) {
+		if (limit_alt == GPIO_PIN_RESET && (HAL_GetTick() - temporizador_homing > 200)) {
 			HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
 			HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
 			HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
@@ -519,8 +587,7 @@ void Motores_UpdateHoming(void) {
 		break;
 
 	case HOME_ALT_BACKOFF:
-		if (limit_alt == GPIO_PIN_SET
-				&& (HAL_GetTick() - temporizador_homing > 200)) {
+		if (limit_alt == GPIO_PIN_SET && (HAL_GetTick() - temporizador_homing > 200)) {
 			HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
 			HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
 
@@ -534,67 +601,55 @@ void Motores_UpdateHoming(void) {
 		break;
 
 	case HOME_ALT_SLOW:
-		if (limit_alt == GPIO_PIN_RESET
-				&& (HAL_GetTick() - temporizador_homing > 200)) {
+		if (limit_alt == GPIO_PIN_RESET && (HAL_GetTick() - temporizador_homing > 200)) {
 			HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-			HAL_Delay(300); // Estabilización mecánica
+			HAL_Delay(300);
 
-			// Capturamos la altura actual reportada por la IMU
 			posicion_actual_alt = imu_actual.inclinacion_y;
-
-			// Pasamos al estado de espera de Azimut / Brújula Oportunista
 			estado_homing = HOME_ALIGN_IMU;
 		}
 		break;
 
-		/* --- AZIMUT OPORTUNISTA + TIMEOUT DE 2 MINUTOS --- */
 	case HOME_ALIGN_IMU: {
 	            uint32_t tiempo_transcurrido = HAL_GetTick() - tiempo_inicio_homing;
 	            uint8_t condicion_mag = (imu_actual.estado_calibracion == 3);
-	            uint8_t timeout_cumplido = (tiempo_transcurrido > 30000); // 2 minutos = 120,000 ms
+	            uint8_t timeout_cumplido = (tiempo_transcurrido > 30000);
 
 	            if (condicion_mag || timeout_cumplido) {
 
-	                // 1. Guardamos la posición actual como memoria estática
 	                if (condicion_mag) {
 	                    posicion_actual_az = imu_actual.orientacion_z;
 	                } else {
-	                    posicion_actual_az = 0.0f; // Timeout superado
+	                    posicion_actual_az = 0.0f;
 	                }
 	                posicion_actual_alt = imu_actual.inclinacion_y;
 
-	                // 2. Pasamos a sala de espera ANTES de disparar
 	                estado_homing = HOME_WAIT_GOTO;
 
-	                // 3. DISPARO ÚNICO Y CORREGIDO: Viajar al cero absoluto (0.0, 0.0)
 	                Motores_SetVelocidadGlobal(SPEED_CENTRAR);
-	                Motores_Apuntar(0.0f, 0.0f); // ¡Ahora sí viaja al cero!
+	                Motores_Apuntar(0.0f, 0.0f);
 	            }
 	            break;
 	        }
 
 	case HOME_WAIT_GOTO:
-		// Esperamos de forma pasiva a que el hardware de interrupciones de los Timers
-		// (HAL_TIM_PWM_PulseFinishedCallback) baje las banderas de llegada.
 		if (flag_goto_terminado_az && flag_goto_terminado_alt) {
 			posicion_actual_az = 0.0f;
-			posicion_actual_alt = 0.0f; // Cero absoluto del horizonte
+			posicion_actual_alt = 0.0f;
 
 			Motores_SetVelocidadGlobal(SPEED_BUSCAR);
-			flag_homing_ok = 1; // ¡Liberamos la FSM principal al Menú!
+			flag_homing_ok = 1;
 			estado_homing = HOME_DONE;
 		}
 		break;
 
 	case HOME_DONE:
-		// Vacío, el control ya pasó a la función Motores_UpdateLogica
 		break;
 
 	default:
 		break;
 	}
 }
-
 
 /**
  * @brief Ejecuta el movimiento milimétrico compensando la rotación de la Tierra.
@@ -603,51 +658,49 @@ void Motores_PasoSideral(float az_nuevo, float alt_nuevo) {
     float delta_az = az_nuevo - posicion_actual_az;
     float delta_alt = alt_nuevo - posicion_actual_alt;
 
-    // Ruta más corta para Azimut
     if (delta_az > 180.0f) delta_az -= 360.0f;
     if (delta_az < -180.0f) delta_az += 360.0f;
 
-    // Calcular micropasos teóricos (con decimales)
     float pasos_teoricos_az = delta_az * PULSOS_POR_GRADO_AZIMUT;
     float pasos_teoricos_alt = delta_alt * PULSOS_POR_GRADO_ALTITUD;
 
-    // Sumar al acumulador histórico
     error_acumulado_az += pasos_teoricos_az;
     error_acumulado_alt += pasos_teoricos_alt;
 
-    // Extraer la parte entera que SÍ se puede mover físicamente
     int32_t pasos_a_dar_az = (int32_t)error_acumulado_az;
     int32_t pasos_a_dar_alt = (int32_t)error_acumulado_alt;
 
-    // Restar del acumulador los pasos que vamos a dar, conservando los decimales puros
     error_acumulado_az -= (float)pasos_a_dar_az;
     error_acumulado_alt -= (float)pasos_a_dar_alt;
 
-    // Setear Direcciones
     if (pasos_a_dar_az > 0) HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_SET);
     else if (pasos_a_dar_az < 0) HAL_GPIO_WritePin(AZ_DIR_PORT, AZ_DIR_PIN, GPIO_PIN_RESET);
 
     if (pasos_a_dar_alt > 0) HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_SET);
     else if (pasos_a_dar_alt < 0) HAL_GPIO_WritePin(ALT_DIR_PORT, ALT_DIR_PIN, GPIO_PIN_RESET);
 
-    // Sincronizar memoria del telescopio
     posicion_actual_az = az_nuevo;
     posicion_actual_alt = alt_nuevo;
 
-    // Forzar la velocidad súper lenta para que el motor no vibre (Tracking)
     Motores_SetVelocidadGlobal(SPEED_GUIAR);
 
-    // Inyectar los pulsos a las variables volátiles de la interrupción IT
     pasos_restantes_az += labs(pasos_a_dar_az);
     pasos_restantes_alt += labs(pasos_a_dar_alt);
 
-    // Disparar Timers sin bloquear el microcontrolador
     if (pasos_restantes_az > 0) {
         flag_goto_terminado_az = 0;
+        rampa_az.freq_actual = FREQ_GUIAR;
+        rampa_az.freq_objetivo = FREQ_GUIAR;
+        rampa_az.activo = 1;
+        __HAL_TIM_SET_COUNTER(&htim2, 0);
         HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
     }
     if (pasos_restantes_alt > 0) {
         flag_goto_terminado_alt = 0;
+        rampa_alt.freq_actual = FREQ_GUIAR;
+        rampa_alt.freq_objetivo = FREQ_GUIAR;
+        rampa_alt.activo = 1;
+        __HAL_TIM_SET_COUNTER(&htim3, 0);
         HAL_TIM_PWM_Start_IT(&htim3, TIM_CHANNEL_1);
     }
 }
@@ -655,25 +708,17 @@ void Motores_PasoSideral(float az_nuevo, float alt_nuevo) {
 /* =========================================================================
  * CALLBACKS DE INTERRUPCIÓN (HAL)
  * ========================================================================= */
-/**
- * @brief Se ejecuta cada vez que el Timer PWM termina un pulso.
- * @note  Esta lógica DEBE ir aquí para precisión micrométrica de hardware.
- */
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim) {
-
-    if (htim->Instance == TIM2) { // Pulso del motor de Azimut
+    if (htim->Instance == TIM2) {
         if (pasos_restantes_az > 0) {
             pasos_restantes_az--;
             if (pasos_restantes_az == 0) {
-                // Se acabó el viaje de este eje: Frenamos el hardware inmediatamente
                 HAL_TIM_PWM_Stop_IT(&htim2, TIM_CHANNEL_1);
-                // Levantamos la bandera para que la FSM tome decisiones
                 flag_goto_terminado_az = 1;
             }
         }
     }
-
-    else if (htim->Instance == TIM3) { // Pulso del motor de Altitud
+    else if (htim->Instance == TIM3) {
         if (pasos_restantes_alt > 0) {
             pasos_restantes_alt--;
             if (pasos_restantes_alt == 0) {

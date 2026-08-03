@@ -167,22 +167,27 @@ void Astronomia_SyncOffset(float imu_alt_actual, float imu_az_actual) {
     if (sinf(ha_rad) > 0.0f) az_rad = (2.0f * PI_F) - az_rad;
     float az_pura_deg = az_rad * RAD2DEG_F;
 
-    /* 2. Cálculo de los offsets de calibración */
+    /* 2. Cálculo seguro del offset de Altitud */
     offset_calibracion.altitud = imu_alt_actual - alt_pura_deg;
 
+    /* 3. Cálculo de offset de Azimut acotado al rango [-180, +180] */
     float diff_az = imu_az_actual - az_pura_deg;
-    if (diff_az > 180.0f)  diff_az -= 360.0f;
-    if (diff_az < -180.0f) diff_az += 360.0f;
+    while (diff_az > 180.0f)  diff_az -= 360.0f;
+    while (diff_az < -180.0f) diff_az += 360.0f;
     offset_calibracion.azimut = diff_az;
 
-    /* 3. CLAVE: Actualizamos también la memoria física interna del módulo motores
-       para que sepa que estamos exactamente en la posición real de la IMU */
+    /* 4. Sincronización exacta de la posición física del telescopio */
     extern float posicion_actual_az;
     extern float posicion_actual_alt;
-    posicion_actual_az = imu_az_actual;
+
+    // Normalizar azimut actual antes de guardarlo en memoria del motor
+    float az_norm = fmodf(imu_az_actual, 360.0f);
+    if (az_norm < 0.0f) az_norm += 360.0f;
+
+    posicion_actual_az = az_norm;
     posicion_actual_alt = imu_alt_actual;
 
-    /* 4. Recalcular Alt/Az globales */
+    /* 5. Recalcular Alt/Az globales para refrescar la struct target_actual */
     Astronomia_CalcularAltAz();
 }
 

@@ -291,68 +291,112 @@ static uint32_t rx_tail = 0;
 static char linea_actual[120];
 static uint8_t indice_linea = 0;
 void Sensores_ProcesarDatos(void) {
-	// A. PROCESAMIENTO GPS (Extracción segura Byte a Byte)
-
-	// Obtenemos la posición actual exacta donde el DMA está escribiendo (Head)
+	// A. PROCESAMIENTO GPS (DMA Circular)
 	uint32_t rx_head = GPS_BUFFER_SIZE - __HAL_DMA_GET_COUNTER(&hdma_usart1_rx);
 
-	// Mientras nuestro puntero de lectura no haya alcanzado al DMA...
 	while (rx_tail != rx_head) {
 		char c = gps_dma_buffer[rx_tail];
-		rx_tail = (rx_tail + 1) % GPS_BUFFER_SIZE; // Avanzamos de forma circular
+		rx_tail = (rx_tail + 1) % GPS_BUFFER_SIZE;
 
 		if (c == '$') {
-			indice_linea = 0; // Si vemos un '$', vaciamos el buffer temporal
+			indice_linea = 0;
 		}
 
-		// Guardamos el caracter si hay espacio
 		if (indice_linea < sizeof(linea_actual) - 1) {
 			linea_actual[indice_linea++] = c;
 		}
 
-		if (c == '\n') { // ¡Trama 100% completada y segura!
-			linea_actual[indice_linea] = '\0'; // Cerramos el string manual
-
-			// Evaluamos solo si es la trama que nos interesa
-			if (strncmp(linea_actual, "$GPRMC", 6) == 0
-					|| strncmp(linea_actual, "$GNRMC", 6) == 0) {
+		if (c == '\n') {
+			linea_actual[indice_linea] = '\0';
+			if (strncmp(linea_actual, "$GPRMC", 6) == 0 || strncmp(linea_actual, "$GNRMC", 6) == 0) {
 				Parser_NMEA_GPRMC(linea_actual);
 			}
 		}
 	}
 
-	// B. PROCESAMIENTO IMU (UART sin bloqueos)
-	    uint8_t cmd_leer[4] = {0xAA, 0x01, 0x1A, 0x06};
-	    uint8_t respuesta[8] = {0};
+	// B. PROCESAMIENTO IMU (Norte Físico + Odometría Relativa Anti-Saltos)
+	static uint32_t ultimo_tick_imu = 0;
 
-	    __HAL_UART_FLUSH_DRREGISTER(&huart6);
-	    HAL_UART_Transmit(&huart6, cmd_leer, 4, 10);
+	if (HAL_GetTick() - ultimo_tick_imu >= 20) { // 50 Hz
+		ultimo_tick_imu = HAL_GetTick();
 
-	    if (HAL_UART_Receive(&huart6, respuesta, 8, 20) == HAL_OK) {
-	        if (respuesta[0] == 0xBB && respuesta[1] == 0x06) {
+		uint8_t cmd_leer[4] = {0xAA, 0x01, 0x1A, 0x06};
+		uint8_t respuesta[8] = {0};
 
-	            // NUEVO: Leemos cómo se siente el sensor (0 = Ciego, 3 = Perfecto)
-	            uint8_t byte_calibracion = IMU_LeerCalibracion();
-	            imu_actual.estado_calibracion = byte_calibracion & 0x03; // Solo nos interesan los bits 0 y 1 (Magnetómetro)
+		__HAL_UART_FLUSH_DRREGISTER(&huart6);
 
-	            int16_t yaw_raw   = (int16_t)((respuesta[3] << 8) | respuesta[2]);
-	            int16_t roll_raw  = (int16_t)((respuesta[5] << 8) | respuesta[4]);
-	            int16_t pitch_raw = (int16_t)((respuesta[7] << 8) | respuesta[6]);
+		if (HAL_UART_Transmit(&huart6, cmd_leer, 4, 10) == HAL_OK) {
+			if (HAL_UART_Receive(&huart6, respuesta, 8, 20) == HAL_OK) {
+				if (respuesta[0] == 0xBB && respuesta[1] == 0x06) {
 
-	            float azimut_magnetico = (float)yaw_raw / 16.0f;
-	            float azimut_verdadero = azimut_magnetico + gps_actual.declinacion_mag;
+					int16_t yaw_raw   = (int16_t)((respuesta[3] << 8) | respuesta[2]);
+					int16_t roll_raw  = (int16_t)((respuesta[5] << 8) | respuesta[4]);
+					int16_t pitch_raw = (int16_t)((respuesta[7] << 8) | respuesta[6]);
 
-	            if (azimut_verdadero < 0.0f) azimut_verdadero += 360.0f;
-	            if (azimut_verdadero >= 360.0f) azimut_verdadero -= 360.0f;
+					float yaw_actual_imu = (float)yaw_raw / 16.0f;
 
-	            // BLOQUEO LÓGICO: Solo actualizamos Z si la brújula ya salió de 0
-	            // Si está en 0, conservamos el último valor conocido para no tragarnos el Cero falso.
-	            if (imu_actual.estado_calibracion > 0) {
-	                imu_actual.orientacion_z = azimut_verdadero;
-	            }
+					// --- LÓGICA DE FIJACIÓN DE NORTE Y RELATIVIDAD ---
+					static uint8_t modo_fijado = 0;
+					static uint8_t es_absoluto = 0;
+					static float yaw_referencia_imu = 0.0f;
+					static float z_acumulado_relativo = 0.0f; // Arranca en 0.0 (Norte Físico)
 
-	            imu_actual.roll_x        = (float)roll_raw / 16.0f;
-	            imu_actual.inclinacion_y = (float)pitch_raw / 16.0f;
-	        }
-	    }
+					// 1. En la primerísima lectura válida, elegimos la estrategia de trabajo
+					if (!modo_fijado) {
+						uint8_t byte_calib = IMU_LeerCalibracion();
+						imu_actual.estado_calibracion = byte_calib & 0x03;
+
+						yaw_referencia_imu = yaw_actual_imu;
+
+						if (imu_actual.estado_calibracion > 0) {
+							// Caso A: La brújula está calibrada -> Usamos Norte Magnético Real
+							es_absoluto = 1;
+						} else {
+							// Caso B: Brújula ciega -> Asumimos Norte Físico Manual (0.0 grados)
+							es_absoluto = 0;
+							z_acumulado_relativo = 0.0f;
+						}
+						modo_fijado = 1;
+					}
+
+					// 2. Procesamiento de ángulo según la estrategia elegida
+					if (es_absoluto) {
+						// Modo Absoluto (Lectura directa de brújula + declinación)
+						float azimut_verdadero = yaw_actual_imu + gps_actual.declinacion_mag;
+						if (azimut_verdadero < 0.0f) azimut_verdadero += 360.0f;
+						if (azimut_verdadero >= 360.0f) azimut_verdadero -= 360.0f;
+						imu_actual.orientacion_z = azimut_verdadero;
+					}
+					else {
+						// Modo Relativo (Calcula solo Deltas desde el Norte Físico 0.0°)
+						float delta_yaw = yaw_actual_imu - yaw_referencia_imu;
+
+						// Corrección del paso por el límite de 0/360 grados
+						if (delta_yaw > 180.0f)  delta_yaw -= 360.0f;
+						if (delta_yaw < -180.0f) delta_yaw += 360.0f;
+
+						z_acumulado_relativo += delta_yaw;
+						yaw_referencia_imu = yaw_actual_imu; // Avanzamos la referencia
+
+						// Normalizar a rango 0 - 360°
+						if (z_acumulado_relativo >= 360.0f) z_acumulado_relativo -= 360.0f;
+						if (z_acumulado_relativo < 0.0f)   z_acumulado_relativo += 360.0f;
+
+						imu_actual.orientacion_z = z_acumulado_relativo;
+					}
+
+					imu_actual.roll_x        = (float)roll_raw / 16.0f;
+					imu_actual.inclinacion_y = (float)pitch_raw / 16.0f;
+				}
+			}
+		}
+
+		// Refresco periódico de estado de calibración (Cada 2 segundos)
+		static uint32_t ultimo_tick_calib = 0;
+		if (HAL_GetTick() - ultimo_tick_calib >= 2000) {
+			ultimo_tick_calib = HAL_GetTick();
+			uint8_t byte_calibracion = IMU_LeerCalibracion();
+			imu_actual.estado_calibracion = byte_calibracion & 0x03;
+		}
 	}
+}
