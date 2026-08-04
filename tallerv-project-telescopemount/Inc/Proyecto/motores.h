@@ -62,4 +62,5 @@ extern volatile uint8_t flag_homing_ok;
 void Motores_IniciarHoming(void);
 void Motores_UpdateHoming(void);
 
+
 #endif // PROYECTO_MOTORES_H

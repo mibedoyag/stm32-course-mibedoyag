@@ -1,3 +1,9 @@
+/**
+ * @file    : interfaz.c
+ * @author  : Miguel A. Bedoya Gonzalez --> mibedoyag@unal.edu.co
+ * @brief   : Implementación la lógica de la interfaz de usuario y comportamiendo del subsistema
+ */
+
 #include "Proyecto/interfaz.h"
 #include "Proyecto/sensores.h"
 #include "Proyecto/astronomia.h"
@@ -8,10 +14,10 @@
 #define LCD_ADDR (0x27 << 1)
 
 static I2C_HandleTypeDef *lcd_i2c;
-TIM_HandleTypeDef htim4;
+TIM_HandleTypeDef htim4;  //Handle de manipulación del tim4 para el modo encoder
 
 SystemState_t currentState = STATE_BOOTING;
-//volatile uint8_t flag_homing_ok = 1; // Simulamos la variable que vendrá de motores.c
+
 
 /* Variables volátiles de los controles */
 volatile int32_t encoder_contador = 0;
@@ -23,7 +29,7 @@ volatile uint8_t flag_btn_speed = 0;
 static int32_t ultimo_encoder = 0; // Para calcular diferencias de movimiento
 static uint32_t boot_timer = 0;    // Temporizador para la pantalla de éxito
 static uint8_t menu_index = 0;     // Índice genérico de menús
-//static uint32_t ultimo_boton_tick = 0; // Para el Anti-Rebote del botón
+
 
 /* Variables para recordar selecciones de Astronomía */
 static uint8_t catalogo_seleccionado = 0; // 0 = Messier, 1 = Estrellas
@@ -32,7 +38,7 @@ static uint8_t total_objetos_actual = 20; // Tamaño del catálogo actual
 
 
 /* =========================================================================
- * DRIVERS DE LA LCD (Se mantienen idénticos a los tuyos)
+ * DRIVERS DE LA LCD
  * ========================================================================= */
 static void LCD_SendNibble(uint8_t nibble) {
 	uint8_t data_t[2];
@@ -76,20 +82,21 @@ void LCD_Print(uint8_t row, uint8_t col, char *str) {
 	}
 }
 
+
 /* =========================================================================
  * FUNCIONES AUXILIARES DE NAVEGACIÓN
  * ========================================================================= */
 
 /**
- * @brief  Procesa el movimiento del encoder para navegar entre un rango definido.
- * @param  max_opciones: Cantidad total de opciones en el menú actual.
+ * Procesa el movimiento del encoder para navegar entre un rango definido por la interfaz de la pantalla.
+ * max_opciones: Cantidad total de opciones en el menú actual qeu se encuentra.
  */
 static void Procesar_Navegacion_Encoder(uint8_t max_opciones) {
 	int32_t delta = encoder_contador - ultimo_encoder;
 	if (delta > 0) {
 		menu_index++;
 		if (menu_index >= max_opciones)
-			menu_index = 0; // Rollover hacia arriba
+			menu_index = 0; // Rollover hacia arriba si se pasa del limite de las pociones máximas
 		ultimo_encoder = encoder_contador;
 		LCD_Clear(); // Limpiamos pantalla al cambiar para no dejar rastros
 	} else if (delta < 0) {
@@ -103,10 +110,10 @@ static void Procesar_Navegacion_Encoder(uint8_t max_opciones) {
 }
 
 /**
- * @brief Renderiza un menú desplazable de 16x2.
- * @param titulo_menu: Arreglo de strings con los nombres.
- * @param total: Número total de opciones.
- * @param index: Índice actual seleccionado.
+ * Renderiza un menú desplazable de 16x2.
+ * titulo_menu: Arreglo de strings con los nombres.
+ * total: Número total de opciones.
+ * index: Índice actual seleccionado.
  */
 static void LCD_MostrarMenu(const char *opciones[], uint8_t total,
 		uint8_t index) {
@@ -123,13 +130,13 @@ static void LCD_MostrarMenu(const char *opciones[], uint8_t total,
 }
 
 /**
- * @brief Lógica para leer el botón Select (PB14) optimizada para filtros RC físicos.
- * @retval 1 si el botón fue presionado de forma válida, 0 en caso contrario.
+ * Lógica para leer el botón Select (PB14).
+ * 1 si el botón fue presionado de forma válida, 0 en caso contrario.
  */
 static uint8_t Leer_Boton_Select(void) {
 	static uint8_t boton_presionado_anterior = 0;
 
-	// FILTRO DE SEGURIDAD: Ignorar transitorios lógicos en el microsegundo de arranque
+	// FILTRO DE SEGURIDAD: Ignorar transitorios lógicos en el microsegundo de arranque de la placa que puede producir estados aleatorios
 	if (HAL_GetTick() < 500) {
 		return 0;
 	}
@@ -259,7 +266,7 @@ void Interfaz_InitLogica(void) {
 	// 2. Inicializar Pantalla LCD
 	lcd_i2c = &hi2c1;
 
-	// Espera crítica para que el voltaje de 5V de la pantalla se estabilice
+	// Espera para que el voltaje de 5V de la pantalla se estabilice
 	HAL_Delay(100);
 
 	// Secuencia oficial de hardware (HD44780) para forzar el paso de 8-bit a 4-bit
@@ -270,7 +277,7 @@ void Interfaz_InitLogica(void) {
 	LCD_SendNibble(0x30);
 	HAL_Delay(1);
 	LCD_SendNibble(0x20);
-	HAL_Delay(1); // ¡A partir de aquí ya estamos en 4-bit!
+	HAL_Delay(1); // A partir de aquí ya estamos en 4-bit
 
 	// Ahora sí podemos usar la función normal de comandos
 	LCD_SendCommand(0x28);
@@ -285,14 +292,27 @@ void Interfaz_InitLogica(void) {
 	HAL_Delay(2); // Display ON, Cursor OFF
 }
 
+
 /* =========================================================================
  * MÁQUINA DE ESTADOS PRINCIPAL (FSM)
+ * controla qué hace el telescopio en cada momento.
+ *
+ * 1. STATE_BOOTING: Estado de bloqueo. El menú no avanza hasta que el GPS fije coordenadas satelitales
+ * y los motores toquen los finales de carrera (flag_homing_ok)
+ * 2. STATE_MANUAL: Muestra los ángulos de la IMU y permite presionar el botón Speed para ciclar entre velocidades (BUSCAR, CENTRAR, GUIAR).
+ * 3. STATE_OFFLINE_...: Es un embudo de 3 pasos. Seleccionas el Catálogo (Messier/Estrellas)
+ * --> Seleccionas el Objeto específico ---> Eliges si quieres "Apuntar" (GoTo) o "Iniciar Track" directamente.
+ * 4. STATE_MOVIENDO: Un estado intermedio de protección. Mientras el GoTo se ejecuta, el sistema se queda aquí escuchando el botón Select como "Freno de Emergencia".
+ * Solo avanza cuando flag_goto_terminado_az/alt son verdaderos.
+ * 5. STATE_CALIBRACION_FINA: Cuando el telescopio llega a la estrella, te cede el control del Joystick. Aquí centras la estrella viendo por el ocular y presionas el
+ *  botón SYNC para recalcular la posición en astronomia.c
+ * 6. STATE_TRACKING: Es el estado final de observación. Cada 1000 ms, hace que el reloj interno de astronomía avance, recalcula la altitud/azimut de la estrella por
+ * la rotación de la tierra, y le dice a los motores que den los micropasos necesarios.
  * ========================================================================= */
 void Interfaz_UpdateFSM(void) {
 	// 1. Lectura obligatoria de hardware
 	Interfaz_LeerEncoder();
 
-	// --- SISTEMA DE LATCHING (CANDADO DE MEMORIA) ---
 	static uint8_t flag_clic_pendiente = 0;
 	static uint8_t flag_speed_pendiente = 0;
 	static uint8_t flag_sync_pendiente = 0;
@@ -305,7 +325,7 @@ void Interfaz_UpdateFSM(void) {
 	char buffer1[20];
 	char buffer2[20];
 
-	// 2. Control de Tasa de Refresco (200ms)
+	// 2. Control de Tasa de Refresco (200ms) o 5 Hz de actualización de la pantalla
 	static uint32_t ultimo_refresco = 0;
 	if (HAL_GetTick() - ultimo_refresco < 200) {
 		return;

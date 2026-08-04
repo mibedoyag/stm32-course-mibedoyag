@@ -8,11 +8,11 @@
 #include "math.h"
 
 /* Inicialización estricta de estructuras a 0 */
-Coordenadas_t target_actual = {0.0f, 0.0f, 0.0f, 0.0f};
-Coordenadas_t offset_calibracion = {0.0f, 0.0f, 0.0f, 0.0f};
+Coordenadas_t target_actual = {0.0f, 0.0f, 0.0f, 0.0f}; // Arreglo que tiene la ubicación A donde queremos ir
+Coordenadas_t offset_calibracion = {0.0f, 0.0f, 0.0f, 0.0f}; //Arreglo que guarda el error que hay al momento de presionar el boton SYNC y se corrija la ubicación
 
 
-/* Catálogo Messier (M1 - M20) */
+/* Catálogo Messier (M1 - M20), al tener el prefijo const, se guardan en la memoria Flash para ahorrar memoria RAM */
 const ObjetoCeleste_t catalogo_messier[] = {
     {"M1 Crab Neb.", 5.57f, 22.01f}, {"M31 And. Gal.", 0.71f, 41.26f},
     {"M42 Orion Neb.", 5.35f, -5.39f}, {"M45 Pleiades", 3.78f, 24.11f},
@@ -36,9 +36,11 @@ const ObjetoCeleste_t catalogo_estrellas[] = {
 };
 
 /**
- * @brief Retorna el puntero al objeto solicitado en el catálogo.
- * @param categoria 0: Messier, 1: Estrellas
- * @param indice Índice dentro del catálogo
+ * Retorna el puntero al objeto solicitado en el catálogo.
+ * categoria 0: Messier, 1: Estrellas
+ * indice Índice dentro del catálogo
+ * Dependiendo de la categoría (0 o 1) y el índice que le pases desde la pantalla LCD, retorna un puntero a la dirección
+ * de memoria donde está guardado ese objeto, permitiendo extraer su nombre, Ascensión Recta (RA) y Declinación (Dec).
  */
 const ObjetoCeleste_t* Astronomia_ObtenerObjeto(uint8_t categoria, uint8_t indice) {
     if (categoria == 0) return &catalogo_messier[indice % 20];
@@ -47,7 +49,7 @@ const ObjetoCeleste_t* Astronomia_ObtenerObjeto(uint8_t categoria, uint8_t indic
 
 
 /**
- * @brief Inicializa a cero las variables del motor astronómico.
+ * nicializa a cero las variables del motor astronómico en 0 para garantizar que no se haya guardado valores basura.
  */
 void Astronomia_InitLogica(void) {
     // Reset de coordenadas objetivo
@@ -57,7 +59,7 @@ void Astronomia_InitLogica(void) {
     target_actual.azimut = 0.0f;
 
     // Reset de offsets del lazo cerrado
-    offset_calibracion.ra = 0.0f; // No usado para offset, pero se inicializa
+    offset_calibracion.ra = 0.0f;
     offset_calibracion.dec = 0.0f;
     offset_calibracion.altitud = 0.0f;
     offset_calibracion.azimut = 0.0f;
@@ -72,8 +74,22 @@ void Astronomia_InitLogica(void) {
 }
 
 /**
- * @brief Calcula la Altitud y el Azimut a partir de la RA y Dec actuales.
+ * Motor trigonométrico: Calcula la Altitud y el Azimut a partir de la RA y Dec actuales.
  * Utiliza la fecha, hora y ubicación del struct gps_actual.
+ * Convierte coordenadas ecuatoriales a horizontales:
+ * 1. Día Juliano Fraccional (d): Utiliza una fórmula estándar de la mecánica celeste para convertir
+ * la fecha del calendario Gregoriano (Año, Mes, Día y Hora UT extraídos del GPS) en un número continuo
+ * de días desde una época estándar (el año 2000).
+ * 2. Tiempo Sideral Local (lst_grados): Calcula el Ángulo Horario del Punto Aries respecto a tu ubicación.
+ * Básicamente, te dice qué parte del cielo está pasando exactamente por encima de tu cabeza en este preciso instante, sumando tu longitud geográfica (gps_actual.longitud).
+ * 3. Ángulo Horario (ha_grados): Determina qué tan lejos (al este o al oeste) está el objeto de tu meridiano local, restando la Ascensión Recta (target_actual.ra)
+ *  del Tiempo Sideral Local. Multiplica la RA por 15 para pasar de horas a grados.
+ * 4. Cálculo de Altitud (Eje Y): Aquí entra la trigonometría esférica pesada. Utiliza una ecuación para resolver la altura sobre el horizonte.
+ * 5. Cálculo del Azimut (Eje X): Resuelve la dirección cardinal usando la ley de los cosenos esféricos
+ * 6. Aplicación de Offsets: Convierte los radianes a grados multiplicando por RAD2DEG_F y les suma los errores
+ * de alineación detectados previamente en la calibración fina (offset_calibracion). Finalmente, normaliza el azimut
+ * usando módulo flotante (fmodf) para mantenerlo estrictamente entre 0 y 360 grados.
+ *
  */
 void Astronomia_CalcularAltAz(void) {
     /* * 1. Cálculo del Día Juliano (Aproximación válida para años 2000-2099)
@@ -134,11 +150,11 @@ void Astronomia_CalcularAltAz(void) {
 }
 
 /**
- * @brief Función para el botón SYNC.
+ * Función para el botón SYNC.
  * Calcula el offset absoluto entre la posición teórica del objeto actual
  * y la posición real medida por la IMU tras el centrado manual en el ocular.
- * @param imu_alt_actual Lectura real en grados del eje de Altitud (IMU Y).
- * @param imu_az_actual Lectura real en grados del eje de Azimut (IMU Z).
+ * imu_alt_actual Lectura real en grados del eje de Altitud (IMU Y).
+ * imu_az_actual Lectura real en grados del eje de Azimut (IMU Z).
  */
 void Astronomia_SyncOffset(float imu_alt_actual, float imu_az_actual) {
     /* 1. Recalculamos la altitud y azimut teóricas puras del objeto actual */
@@ -192,8 +208,10 @@ void Astronomia_SyncOffset(float imu_alt_actual, float imu_az_actual) {
 }
 
 /**
- * @brief Avanza el reloj astronómico en modo offline para el seguimiento sideral.
- * @param delta_ms Milisegundos transcurridos desde la última llamada
+ * Avanza el reloj astronómico en modo offline para el seguimiento sideral.
+ * delta_ms Milisegundos transcurridos desde la última llamada
+ * Cuando el telescopio entra en modo Tracking, ya no dependes de las
+ * actualizaciones del GPS (para ahorrar procesamiento y evitar problemas si se pierde la señal).
  */
 void Astronomia_AvanzarTiempo(uint32_t delta_ms) {
     // Convertir milisegundos a horas decimales y sumarlas a la hora UT actual

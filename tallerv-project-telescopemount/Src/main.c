@@ -2,7 +2,24 @@
  * @file    : main.c
  * @author  : Miguel A. Bedoya Gonzalez --> mibedoyag@unal.edu.co
  * @brief   : Archivo principal del proyecto (Bare-Metal HAL).
- */
+ *
+ * =============================================================================================
+ * RESUMEN DEL PROYECTO
+ * ==============================================================================================
+ * Este proyecto basado para una montura de telescopio altazimutal
+ * automatizada, tiene como función principal  permitir
+ * el apuntamiento astronómico absoluto (GoTo), el seguimiento sideral continuo y el control
+ * manual del tubo óptico. Para lograrlo, el sistema adquiere la ubicación geográfica y la hora
+ * UTC exactas a través de un módulo GPS operado por DMA, mientras que una IMU (BNO055)
+ * proporciona la realimentación espacial de Altitud y Azimut en lazo cerrado, actuando como
+ * corrector de posición. El movimiento se
+ * ejecuta resolviendo ecuaciones de trigonometría esférica en tiempo real y generando señales
+ * PWM con rampas de aceleración no bloqueantes para motores paso a paso. La lógica global está
+ * orquestada por una Máquina de Estados Finitos (FSM) que gestiona simultáneamente una interfaz
+ * HMI interactiva (LCD, Joystick y Encoder) y un hilo de comunicación serial UART, el cual
+ * interpreta el protocolo estándar Meade LX200 para sincronizar la montura de forma nativa con
+ * simuladores astronómicos de PC como Stellarium.
+ * ============================================================================================== */
 
 #include "stm32f4xx_hal.h"
 #include "Proyecto/main_logic.h" // ¡Solo necesitas incluir el orquestador principal!
@@ -21,20 +38,19 @@ int main(void)
     HAL_Init();
     SystemClock_Config();
 
-    /* 2. Inicialización de Blinky (Hardware base) */
+    /* 2. Inicialización de Blinky */
     Blinky();
 
-    /* 3. INICIALIZACIÓN ORQUESTADA
-     * Aquí adentro se inician los Motores, Sensores, Pantalla e Interfaz */
+    /* 3. INICIALIZACIÓN DE LA MONTURA
+     * Aquí  se inician los Motores, Sensores, Pantalla e Interfaz */
     Montura_Init();
 
     /* 4. Superlazo infinito (Super-Loop) */
     while (1)
     {
-        /* Todo el procesamiento (GPS, IMU, FSM, Motores) ocurre en esta línea */
+        /* Todo el procesamiento (GPS, IMU, FSM, Motores) ocurre en está función */
         Montura_Loop();
 
-        /* Micro-delay para estabilizar el muestreo */
         HAL_Delay(1);
     }
 }

@@ -1,6 +1,7 @@
 /**
  * @file    : comunicacion.c
- * @brief   : Parser LX200 Indestructible (Uso de strstr)
+ * @author  : Miguel Angel Bedoya G. --> mibedoyag@unal.edu.co
+ * @brief   : Parser LX200 protocolo de comunicación serial
  */
 #include "Proyecto/comunicacion.h"
 #include "Proyecto/astronomia.h"
@@ -11,8 +12,11 @@
 #include <stdlib.h>
 #include <math.h>
 
-UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart2; //Handle de manipulación de USART2 para comunicación serial con Stellarium
 
+
+/*Si el microcontrolador está ocupado calculando trigonometría o moviendo la pantalla, podría perder letras del comando.
+ * Este Ring Buffer actúa como una sala de espera: la interrupción mete los caracteres rápidamente por la "cabeza", y luego el lazo principal los procesa con calma */
 #define RX_RING_SIZE 256
 static uint8_t rx_ring[RX_RING_SIZE];
 static uint32_t rx_head = 0;
@@ -32,7 +36,7 @@ void Comunicacion_InitLogica(void) {
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     huart2.Instance = USART2;
-    // 9600 baudios es el estándar inamovible de Meade LX200
+    // 9600 baudios es el estándar del protocolo Meade LX200
     huart2.Init.BaudRate = 9600;
     huart2.Init.WordLength = UART_WORDLENGTH_8B;
     huart2.Init.StopBits = UART_STOPBITS_1;
@@ -48,10 +52,17 @@ void Comunicacion_InitLogica(void) {
     HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
 }
 
+
+/* Toma una cadena de texto (string) y la envía de vuelta al PC usando HAL_UART_Transmit
+ * YA que el protocolo lo primero que hace es solicitar información de RA y DEC actual del telescopio */
 static void Transmitir_Respuesta(const char* respuesta) {
     HAL_UART_Transmit(&huart2, (uint8_t*)respuesta, strlen(respuesta), 100);
 }
 
+
+/* Extrae caracteres del Ring Buffer y los va pegando en cmd_buffer hasta que encuentra un símbolo de numeral (#),
+ * que es el carácter oficial que indica "Fin de Comando" en el protocolo LX200. Una vez que tiene un comando completo,
+ * utiliza la función strstr de C para buscar subcadenas y saber qué orden dio el PC */
 void Comunicacion_ProcesarComandos(void) {
     if (currentState != STATE_ONLINE) return;
 
@@ -65,7 +76,7 @@ void Comunicacion_ProcesarComandos(void) {
         // Metemos todo al buffer ignorando desbordamientos, EXCEPTO el cierre
         if (cmd_idx < 127 && c != '#') {
             cmd_buffer[cmd_idx++] = c;
-            cmd_buffer[cmd_idx] = '\0'; // Mantenerlo como string válido de C
+            cmd_buffer[cmd_idx] = '\0';
         }
         else if (c == '#') {
 

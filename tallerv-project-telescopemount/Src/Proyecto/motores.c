@@ -1,7 +1,7 @@
 /**
  * @file    : motores.c
  * @author  : Miguel A. Bedoya Gonzalez --> mibedoyag@unal.edu.co
- * @brief   : Implementación de la lógica de movimiento, escalado de pasos y mapeo analógico.
+ * @brief   : Implementación de la lógica de movimiento, escalado de pasos, rampa de aceleracion y mapeo analógico (ADC).
  * Configuración de TIM2 (Azimut), TIM3 (Altitud) y ADC1 con DMA (Joystick).
  */
 
@@ -33,7 +33,7 @@ static uint16_t joy_centro_y = 2048;
 #define ALT_DIR_PORT GPIOA
 #define ALT_DIR_PIN  GPIO_PIN_5 // PA5
 
-/* Definición de Pines Físicos para Finales de Carrera (Compatibles Nucleo/Blackpill) */
+/* Definición de Pines Físicos para Finales de Carrera */
 #define LIMIT_AZ_PORT  GPIOB
 #define LIMIT_AZ_PIN   GPIO_PIN_1  // PB1 - Final de Carrera Azimut (Filtro RC -> GND)
 #define LIMIT_ALT_PORT GPIOB
@@ -69,8 +69,8 @@ JoystickData_t joystick_actual;
 VelocidadModo_t velocidad_actual;
 
 /* Variables de estado interno para la cinemática */
-float posicion_actual_az = 0.0f;  // Equivalente a 'preaz' del .ino
-float posicion_actual_alt = 0.0f; // Equivalente a 'prealt' del .ino
+float posicion_actual_az = 0.0f;
+float posicion_actual_alt = 0.0f;
 
 volatile uint32_t pasos_restantes_az = 0;
 volatile uint32_t pasos_restantes_alt = 0;
@@ -107,7 +107,7 @@ volatile MotorRampa_t rampa_alt = {0, 0, 10, 0};
  * ========================================================================= */
 
 /**
- * @brief Configuración de los pines GPIO para Dirección y Timers.
+ * Configuración de los pines GPIO para Dirección y Timers para el CH1_TIM2 Y CH1_TIM3.
  */
 static void Motores_GPIO_Init(void) {
     __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -147,11 +147,11 @@ static void Motores_GPIO_Init(void) {
 }
 
 /**
- * @brief Configuración del ADC1 en modo Scan Continuo con DMA para PA1 y PA2.
+ * onfiguración del ADC1 en modo Scan Continuo con DMA para PA1 y PA2.
  */
 static void Motores_ADC_Init(void) {
     __HAL_RCC_ADC1_CLK_ENABLE();
-    __HAL_RCC_DMA2_CLK_ENABLE(); // El ADC1 en el F411 utiliza el DMA2
+    __HAL_RCC_DMA2_CLK_ENABLE();
 
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
@@ -205,7 +205,7 @@ static void Motores_ADC_Init(void) {
     sConfig.Rank = 2;
     HAL_ADC_ConfigChannel(&hadc1, &sConfig);
 
-    // Configurar interrupción del DMA (útil si hay errores de transmisión)
+    // Configurar interrupción del DMA
     HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
 }
@@ -213,6 +213,7 @@ static void Motores_ADC_Init(void) {
 /**
  * @brief Configuración de los Timers 2 y 3 para generar PWM a 1 MHz de base.
  */
+
 static void Motores_TIM_Init(void) {
     __HAL_RCC_TIM2_CLK_ENABLE();
     __HAL_RCC_TIM3_CLK_ENABLE();
@@ -251,11 +252,14 @@ static void Motores_TIM_Init(void) {
 }
 
 /* =========================================================================
- * 3. LÓGICA DEL MÓDULO (API PÚBLICA)
+ * 3. LÓGICA DEL MÓDULO
  * ========================================================================= */
 
 /**
- * @brief Inicializa el hardware y pone el sistema mecánico en un estado seguro.
+ * Inicializa el hardware y pone el sistema mecánico en un estado seguro.
+ * Llama a las configuraciones de hardware, detiene cualquier pulso residual en los motores por seguridad,
+ * inicia el DMA del joystick, calibra el "centro físico" del joystick tomando una muestra inicial
+ * (joy_centro_x, joy_centro_y) y, finalmente, dispara la secuencia de Homing.
  */
 void Motores_InitLogica(void) {
     Motores_GPIO_Init();
@@ -274,14 +278,14 @@ void Motores_InitLogica(void) {
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_dma_buffer, 2);
 
 	HAL_Delay(100);
-	joy_centro_x = adc_dma_buffer[0];
-	joy_centro_y = adc_dma_buffer[1];
+	joy_centro_x = adc_dma_buffer[0]; //Primera posición del arreglo tiene la lectura en resposo en X del joystick
+	joy_centro_y = adc_dma_buffer[1]; //Segunda posición del arreglo tiene la lectura en resposo en X del joystick
 
     Motores_IniciarHoming();
 }
 
 /**
- * @brief Modifica el registro ARR (Auto-Reload Register) en tiempo real
+ * Modifica el registro ARR (Auto-Reload Register) en tiempo real, haciendo así que se puedan elegir perfiles de velocidad
  */
 void Motores_SetVelocidadGlobal(VelocidadModo_t nueva_velocidad) {
     velocidad_actual = nueva_velocidad;
@@ -294,16 +298,19 @@ void Motores_SetVelocidadGlobal(VelocidadModo_t nueva_velocidad) {
     }
 
 	__HAL_TIM_SET_AUTORELOAD(&htim2, nuevo_arr);
-	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, nuevo_arr / 2);
-	__HAL_TIM_SET_COUNTER(&htim2, 0);
+	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, nuevo_arr / 2); //Se divide entre dos para que quede un duty del 50%
+	__HAL_TIM_SET_COUNTER(&htim2, 0); ///Se asegura que el contador inicie en 0 para que no hayan desbordamientos prematuros  del tamaño del TIMER
 
 	__HAL_TIM_SET_AUTORELOAD(&htim3, nuevo_arr);
-	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, nuevo_arr / 2);
+	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, nuevo_arr / 2); //Se divide entre dos para que quede un duty del 50%
 	__HAL_TIM_SET_COUNTER(&htim3, 0);
 }
 
 /**
- * @brief Gestiona la aceleración suave de los motores.
+ * Gestiona la aceleración suave de los motores.
+ * Los motores paso a paso pierden pasos si los arrancas de 0 a máxima velocidad instantáneamente.
+ * Esta función se ejecuta cada 5 milisegundos y va incrementando o disminuyendo gradualmente la
+ * frecuencia actual (freq_actual) hasta alcanzar la velocidad objetivo (freq_objetivo)
  */
 static void Motores_ProcesarRampas(void) {
     static uint32_t ultimo_tick_rampa = 0;
@@ -354,6 +361,11 @@ static void Motores_ProcesarRampas(void) {
 
 /**
  * @brief Lógica de evaluación periódica del sistema de movimiento con suavizado ADC y velocidad global.
+ * 1. Se asgura de que el sistema haya hecho el Homing y tenga esa bandera levantada
+ * 2. Actualiza las rampas de aceleración para que estén actualizadas con la velocidad de movimiento elegida
+ * 3. Hace un suavizado de las lecturas del joystick sacando un promedio cada 10 mediciones
+ * 4. Matiene la sincronización de la posición de los motores con el JOystick junto con la lectura de la IMU para saber si se debe compensar alguna posicón o no a partir de los delta
+ * 5. Agrega la zona muerta a la posición central del joystick para asegurarse de que no hayan movimientos por algun transiente
  */
 void Motores_UpdateLogica(void) {
 	if (estado_homing != HOME_DONE) {
@@ -390,7 +402,7 @@ void Motores_UpdateLogica(void) {
 	static uint8_t az_estado = 0;
 	static uint8_t alt_estado = 0;
 
-	// ------------------ PARCHE DE SINCRONIZACIÓN FÍSICA (DELTA IMU INVERTIDO) ------------------
+	// ------------------ SINCRONIZACIÓN FÍSICA (DELTA IMU) ------------------
 	static uint8_t joystick_en_uso = 0;
 	static float imu_az_inicio_joy = 0.0f;
 	static float imu_alt_inicio_joy = 0.0f;
@@ -406,7 +418,7 @@ void Motores_UpdateLogica(void) {
 			pos_alt_inicio_joy = posicion_actual_alt;
 		} else {
 			if (rampa_az.activo) {
-				// Invertimos la polaridad del delta de IMU para alinearla con los motores
+				// Invertimos la polaridad del delta de IMU para alinearla con los motores ya que los jes de movimiento de joystick se invirtieron
 				float delta_az_imu = imu_az_inicio_joy
 						- imu_actual.orientacion_z;
 				if (delta_az_imu > 180.0f)
@@ -504,9 +516,16 @@ void Motores_UpdateLogica(void) {
 }
 
 /**
- * @brief Algoritmo principal de movimiento GoTo (Equivalente a 'steptep' mejorado)
- * @param azimut_target  Ángulo objetivo en Azimut (0 a 360)
- * @param altitud_target Ángulo objetivo en Altitud (-90 a 90)
+ * Algoritmo principal de movimiento GoTo
+ * azimut_target  Ángulo objetivo en Azimut (0 a 360)
+ * altitud_target Ángulo objetivo en Altitud (-90 a 90)
+ *
+ * Recibe los datos del protocolo LX200 o de la base de datos interna y los ejecuta para ir al objetivo seleccionado
+ * 1. Calcula el recorrido más corto restando la posición actual del objetivo (delta_az, delta_alt).
+ * 2. Decide la dirección de giro (estableciendo los pines DIR en SET o RESET).
+ * 3. Traduce los grados de movimiento a pasos enteros utilizando tus constantes mecánicas (PULSOS_POR_GRADO_AZIMUT, PULSOS_POR_GRADO_ALTITUD)
+ * y los guarda en pasos_restantes_az y pasos_restantes_alt.
+ * 4. Enciende las interrupciones de los Timers para que empiecen a disparar pulsos
  */
 void Motores_Apuntar(float azimut_target, float altitud_target) {
     float delta_az = azimut_target - posicion_actual_az;
@@ -548,7 +567,7 @@ void Motores_Apuntar(float azimut_target, float altitud_target) {
 }
 
 /**
- * @brief Detiene los motores inmediatamente en caso de emergencia o cancelación
+ * Detiene los motores inmediatamente en caso de emergencia o cancelación del GoTo
  */
 void Motores_DetenerGoTo(void) {
     HAL_TIM_PWM_Stop_IT(&htim2, TIM_CHANNEL_1);
@@ -561,6 +580,12 @@ void Motores_DetenerGoTo(void) {
     rampa_alt.activo = 0;
 }
 
+
+
+/*Rutina de calibración inicial:
+ * Apaga el motor de Azimut y ordena al de Altitud que empiece a bajar a velocidad moderada.
+ * Inicia los temporizadores para evaluar timeouts (tiempo de espera máximo para que la IMU se calibre o no)
+ */
 static uint32_t temporizador_homing = 0;
 static uint32_t tiempo_inicio_homing = 0;
 
@@ -579,7 +604,13 @@ void Motores_IniciarHoming(void) {
 }
 
 /**
- * @brief Sub-máquina de estados no bloqueante para el Homing Híbrido.
+ * Sub-máquina de estados que controla todo el proceso de la rutina de homing.
+ * 1. HOME_ALT_FAST: El telescopio baja hasta que presiona físicamente el micro-switch (LIMIT_ALT_PIN).
+ * 2. HOME_ALT_BACKOFF: El motor retrocede un poco hasta liberar el switch.
+ * 3. HOME_ALT_SLOW: Vuelve a tocar el switch a una velocidad muy baja para tener precisión.
+ * 4. HOME_ALIGN_IMU: Tras tocar el switch, el sistema lee la IMU y fuerza un movimiento autónomo
+ * GoTo hacia el centro absoluto (0.0 en Altitud y Azimut) para dejar el telescopio perfectamente nivelado y orientado antes de liberar el control al usuario.
+ *
  */
 void Motores_UpdateHoming(void) {
 	if (estado_homing == HOME_IDLE || estado_homing == HOME_DONE)
@@ -617,7 +648,7 @@ void Motores_UpdateHoming(void) {
 	case HOME_ALT_SLOW:
 		if (limit_alt == GPIO_PIN_RESET && (HAL_GetTick() - temporizador_homing > 200)) {
 			HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
-			HAL_Delay(300); // Estabilización mecánica
+			HAL_Delay(300);
 
 			posicion_actual_alt = imu_actual.inclinacion_y;
 			estado_homing = HOME_ALIGN_IMU;
@@ -700,8 +731,11 @@ void Motores_UpdateHoming(void) {
 	}
 }
 
+
 /**
- * @brief Ejecuta el movimiento milimétrico compensando la rotación de la Tierra.
+ * Ejecuta el movimiento milimétrico compensando la rotación de la Tierra para el menú de trancking
+ * Como un motor no puede dar "medios pasos" arbitrarios, esta función acumula los decimales en error_acumulado_az y error_acumulado_alt.
+ * Solo cuando ese error acumulado forma un número entero (ej. 1.0), se envía el pulso al motor.
  */
 void Motores_PasoSideral(float az_nuevo, float alt_nuevo) {
     float delta_az = az_nuevo - posicion_actual_az;

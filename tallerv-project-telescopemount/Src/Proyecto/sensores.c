@@ -1,5 +1,6 @@
 /**
  * @file    : sensores.c
+ * @author  : Miguel A. Bedoya Gonzalez --> mibedoyag@unal.edu.co
  * @brief   : Implementación BNO055 (UART6), LCD (I2C1) y NEO-M8N (UART1 + DMA).
  */
 #include "Proyecto/sensores.h"
@@ -10,10 +11,10 @@
 extern uint32_t currentState;
 #define STATUS_STATE_ERROR 3
 
-I2C_HandleTypeDef hi2c1;
-UART_HandleTypeDef huart1;
-UART_HandleTypeDef huart6;
-DMA_HandleTypeDef hdma_usart1_rx;
+I2C_HandleTypeDef hi2c1; //Handle para el I2C de la pantalla 16x2
+UART_HandleTypeDef huart1; //Handle para USART1 y el manejo del GPS NEO M8N
+UART_HandleTypeDef huart6; //Handle para USART6 y el manejor de la IMU BNO055
+DMA_HandleTypeDef hdma_usart1_rx; //Handle para la DMA que trata los datos recolectados por el GPS
 
 char gps_dma_buffer[GPS_BUFFER_SIZE] = {0};
 char gps_rx_buffer[GPS_BUFFER_SIZE] = {0};
@@ -43,6 +44,8 @@ static void Sensores_I2C1_Init(void) {
     HAL_I2C_Init(&hi2c1);
 }
 
+
+//FUncion de inicialización del periferico USART1 para el GPS
 static void Sensores_UART1_Init(void) {
     __HAL_RCC_DMA2_CLK_ENABLE();
     __HAL_RCC_USART1_CLK_ENABLE();
@@ -82,6 +85,8 @@ static void Sensores_UART1_Init(void) {
     HAL_NVIC_EnableIRQ(DMA2_Stream5_IRQn);
 }
 
+
+//FUncion de inicialización del periferico USART6 para el BNO055
 static void Sensores_UART6_Init(void) {
     __HAL_RCC_USART6_CLK_ENABLE();
     __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -106,8 +111,12 @@ static void Sensores_UART6_Init(void) {
 }
 
 /* =========================================================================
- * 2. MÉTODOS DE COMUNICACIÓN UART ROBUSTOS
+ * 2. MÉTODOS DE COMUNICACIÓN UART
  * ========================================================================= */
+
+/* Envía una trama de 5 bytes (con la cabecera 0xAA) ordenando al BNO055 que escriba un valor en un registro específico.
+ * Antes de enviar, purga el buffer de recepción (__HAL_UART_FLUSH_DRREGISTER) para evitar leer basura anterior.*/
+
 static uint8_t IMU_EscribirRegistro(uint8_t registro, uint8_t valor) {
     uint8_t cmd[5] = {0xAA, 0x00, registro, 0x01, valor};
     uint8_t respuesta[2] = {0, 0};
@@ -126,7 +135,11 @@ static uint8_t IMU_EscribirRegistro(uint8_t registro, uint8_t valor) {
     return 0; // Fallo
 }
 
-// NUEVO: Función para leer el estado interno del procesador BNO055
+/* Envía un comando de lectura (0xAA 0x01...) apuntando al registro de estado de calibración (0x35).
+Si la IMU responde con la cabecera 0xBB, retorna el tercer byte, que contiene el nivel de calibración de la brújula.
+Usado para saber si el magnetómetro está calibrado yse puede confiar en su lectura real o se pasa a sistema de calibración
+relativa que utiliza la posición inicial de la montura como su referencia 0 o Norte */
+
 static uint8_t IMU_LeerCalibracion(void) {
     uint8_t cmd_leer[4] = {0xAA, 0x01, 0x35, 0x01};
     uint8_t respuesta[3] = {0};
@@ -146,6 +159,11 @@ static uint8_t IMU_LeerCalibracion(void) {
 
 /* =========================================================================
  * 3. LÓGICA DE INICIALIZACIÓN
+ * Se ecarga de llamar la funciones que inicializan y configuran cada uno de los perifericos
+ * que componen el hardware definido en este archivo. Hace 3 intentos para inicializar la IMU
+ * y así asegurarse de que funcione además de configurarla en el modo NDoF que entregará
+ * los ángulos euler. Y por último iniciliza la DMA para que comience a llevar los datos
+ * recogidos por el GPS
  * ========================================================================= */
 void Sensores_InitLogica(void) {
     Sensores_I2C1_Init();
@@ -169,7 +187,7 @@ void Sensores_InitLogica(void) {
         IMU_EscribirRegistro(0x3D, 0x00); // Modo Config
         HAL_Delay(40);
 
-        // Oscilador interno para clones GY-BNO055
+        // Oscilador interno para GY-BNO055
         IMU_EscribirRegistro(0x3F, 0x00);
         HAL_Delay(30);
 
@@ -194,9 +212,11 @@ void Sensores_InitLogica(void) {
 /* =========================================================================
  * 4. PROCESAMIENTO DE DATOS EN LAZO
  * ========================================================================= */
+
 /**
- * @brief Convierte grados/minutos NMEA a grados decimales usando doble precisión.
- * @note Se pasa el string directamente para aprovechar atof() que devuelve un double.
+ * ConvertirCoordenadas:
+ * Convierte grados/minutos que viene junto de la trama NMEA a grados y decimales separados usando doble precisión.
+ * Además de asignarle el signo - (menos) si detecta que que SUR (S) u OESTE (W)
  */
 static float ConvertirCoordenada(const char* nmea_str, char direccion) {
     if (nmea_str == NULL || strlen(nmea_str) == 0) return 0.0f;
@@ -212,11 +232,17 @@ static float ConvertirCoordenada(const char* nmea_str, char direccion) {
 
     return (float)decimal; // Retornamos a float para la FPU de astronomia.c
 }
+
 /**
- * @brief Extrae datos de la trama GPRMC de forma robusta, soportando campos vacíos.
- * Permite capturar la hora del RTC interno del GPS sin necesidad de satélites.
+ * Parser_NMEA_GPRMC: Extrae datos de la trama GPRMC soportando campos vacíos y separando cada una de la información que compone la trama.
+ * Permite capturar la hora del RTC interno del GPS sin necesidad de satélites y mantener el tiempo actualizado.
+ *
+ * Espera a recibir 5 tramas correctas seguidas para asegurar que la señal es estable. Una vez que guarda la Latitud y Longitud,
+ * "cierra el candado" y nunca más vuelve a sobreescribir la posición, evitando que un salto en la señal GPS
+ * arruine el alineamiento del telescopio en plena observación.
  */
-// Variables estáticas para el candado inteligente de posición propuesto
+
+// Variables estáticas para el candado inteligente de posición
 volatile uint8_t gps_coordenadas_fijadas = 0;
 static uint8_t gps_lecturas_validas = 0;
 
@@ -244,7 +270,7 @@ static void Parser_NMEA_GPRMC(char *trama_limpia) {
 			int mm = (int) ((raw_time - (hh * 10000.0)) / 100.0);
 			double ss = raw_time - (hh * 10000.0) - (mm * 100.0);
 
-			// Guardamos en horas decimales perfectas para astronomia.c
+			// Guardamos en horas decimales necesarias en astronomia.c
 			gps_actual.ut_horas = (float) hh + ((float) mm / 60.0f)
 					+ ((float) ss / 3600.0f);
 		}
@@ -256,7 +282,7 @@ static void Parser_NMEA_GPRMC(char *trama_limpia) {
 			gps_actual.anio = (fecha % 100) + 2000;
 		}
 
-        // 3. LATITUD Y LONGITUD (Bloqueo Estático para Telescopio)
+        // 3. LATITUD Y LONGITUD (Bloqueo Estático)
         if (campos[2][0] == 'A') { // Si hay Fix válido de los satélites
 
             if (gps_coordenadas_fijadas == 0) {
@@ -270,7 +296,7 @@ static void Parser_NMEA_GPRMC(char *trama_limpia) {
                     if (strlen(campos[5]) > 0) {
                         gps_actual.longitud = ConvertirCoordenada(campos[5], campos[6][0]);
                     }
-                    // ¡Candado activado! No volveremos a sobreescribir la posición.
+                    // No volveremos a sobreescribir la posición.
                     gps_coordenadas_fijadas = 1;
                 }
             }
@@ -286,6 +312,17 @@ static void Parser_NMEA_GPRMC(char *trama_limpia) {
  * 4. PROCESAMIENTO DE DATOS EN LAZO
  * ========================================================================= */
 
+/* Sensores_ProcesarDatos:
+ * (Procesamiento GPS): Revisa si el DMA dejó caracteres nuevos en el buffer circular. Los lee uno por uno agrupándolos
+ * en líneas completas hasta encontrar un salto de línea (\n). Si la línea empieza con $GPRMC o $GNRMC,
+ * se la envía al Parser para extraer los datos.
+ *
+ * (Procesamiento IMU): Utiliza lun muestreo no bloqueante con HAL_GetTick().
+ * Solo entra a leer la IMU cada 20 milisegundos (50 Hz), dejando el procesador libre el resto del tiempo.
+ * Revisa si la brújula está calibrada magnéticamente (es_absoluto). Si lo está, suma la declinación magnética local
+ * y entrega el Azimut real. Pero si la brújula está descalibrada/ciega, cambia a un modo de
+ * "Odometría Relativa": asume que el momento en que encendiste el sistema es el Norte Físico (0.0°) y a partir de ahí solo calcula cuánto te has movido (deltas)
+ */
 // Variables estáticas para la persecución del DMA (Ring Buffer)
 static uint32_t rx_tail = 0;
 static char linea_actual[120];
