@@ -775,4 +775,21 @@ void Interfaz_UpdateFSM(void) {
 		LCD_Print(1, 0, "Revise sensores ");
 		break;
 	}
+	// =========================================================================
+		// OVERRIDE GLOBAL DE ALARMA VISUAL
+		// Si el sistema ya hizo Homing y el switch es presionado, sobrescribe la Fila 0
+		// =========================================================================
+		extern volatile uint8_t flag_homing_ok;
+		if (flag_homing_ok && HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_2) == GPIO_PIN_RESET) {
+
+				// Filtramos para que la alarma solo pise la pantalla en estados operativos
+				if (currentState == STATE_MANUAL ||
+				    currentState == STATE_MOVIENDO ||
+				    currentState == STATE_TRACKING ||
+				    currentState == STATE_CALIBRACION_FINA ||
+				    currentState == STATE_ONLINE) {
+
+					LCD_Print(0, 0, "!! LIMITE ALT !!");
+				}
+			}
 }

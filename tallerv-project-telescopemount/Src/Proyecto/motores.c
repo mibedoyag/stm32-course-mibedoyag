@@ -373,6 +373,24 @@ void Motores_UpdateLogica(void) {
 	        return;
 	    }
 
+	// =========================================================================
+	// BARRERA DE SEGURIDAD ABSOLUTA (FINAL DE CARRERA FÍSICO)
+	// =========================================================================
+	// Leemos si el switch está presionado (GND = RESET)
+	uint8_t switch_alt_tocado = (HAL_GPIO_ReadPin(LIMIT_ALT_PORT, LIMIT_ALT_PIN)
+			== GPIO_PIN_RESET);
+
+	// Leemos hacia dónde está intentando girar el motor en este instante
+	uint8_t dir_alt_actual = HAL_GPIO_ReadPin(ALT_DIR_PORT, ALT_DIR_PIN);
+
+	// Si el switch está tocado Y el motor intenta seguir bajando (RESET)
+	if (switch_alt_tocado && dir_alt_actual == GPIO_PIN_RESET) {
+		HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1); // Corta la energía inmediatamente
+		rampa_alt.activo = 0;                    // Apaga el generador de rampas
+		rampa_alt.freq_objetivo = 0;             // Frecuencia a cero
+		pasos_restantes_alt = 0; // Aborta cualquier GoTo que estuviera en curso
+	}
+
 	Motores_ProcesarRampas();
 
 	static SystemState_t estado_anterior = STATE_BOOTING;
