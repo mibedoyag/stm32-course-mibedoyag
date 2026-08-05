@@ -1,7 +1,7 @@
 /**
  * @file    : main.c
  * @author  : Miguel A. Bedoya Gonzalez --> mibedoyag@unal.edu.co
- * @brief   : Archivo principal del proyecto (Bare-Metal HAL).
+ * @brief   : Archivo principal del proyecto..
  *
  * =============================================================================================
  * RESUMEN DEL PROYECTO

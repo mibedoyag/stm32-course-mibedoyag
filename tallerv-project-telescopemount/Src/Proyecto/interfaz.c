@@ -777,12 +777,12 @@ void Interfaz_UpdateFSM(void) {
 	}
 	// =========================================================================
 		// OVERRIDE GLOBAL DE ALARMA VISUAL
-		// Si el sistema ya hizo Homing y el switch es presionado, sobrescribe la Fila 0
+		// Si el sistema ya hizo Homing y el switch es presionado, sobrescribe la Fila 0 con el mensaje
 		// =========================================================================
 		extern volatile uint8_t flag_homing_ok;
 		if (flag_homing_ok && HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_2) == GPIO_PIN_RESET) {
 
-				// Filtramos para que la alarma solo pise la pantalla en estados operativos
+				// Filtro para que la alarma solo pise la pantalla en estados operativos
 				if (currentState == STATE_MANUAL ||
 				    currentState == STATE_MOVIENDO ||
 				    currentState == STATE_TRACKING ||
